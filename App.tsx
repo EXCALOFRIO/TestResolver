@@ -1,5 +1,4 @@
 import React, { useState, useCallback, useMemo } from 'react';
-import { AdminPage } from './AdminPage';
 import { AppState, Question, ResultsState, StrategyKey } from './types';
 import { STRATEGIES } from './constants';
 import { extractQuestionsFromImage, extractQuestionsFromText, getAndResetGeminiStats, multiModelBatchSolve } from './services/geminiService';
@@ -187,10 +186,10 @@ const App: React.FC = () => {
     setError(null);
   };
 
-  // Router mínimo: si path incluye /admin mostrar AdminPage
+  // Router mínimo: rutas especiales (admin/evals eliminadas)
   if (typeof window !== 'undefined') {
     const path = window.location.pathname;
-    if (path.startsWith('/admin')) return <AdminPage />;
+    // rutas personalizadas eliminadas en esta rama
   }
 
   return (
