@@ -17,8 +17,10 @@ const getEnv = (k: string): string | undefined => (typeof process !== 'undefined
 // -------- API Key Rotation Logic --------
 // Collect keys GEMINI_API_KEY0..9 (flexible) from env.
 const allEnvKeys: string[] = typeof process !== 'undefined' && process?.env ? Object.keys(process.env) : Object.keys((import.meta as any)?.env || {});
+// Acepta GEMINI_API_KEY, GEMINI_API_KEY0..9, y también variantes con prefijo VITE_
+// Ejemplos válidos: GEMINI_API_KEY, GEMINI_API_KEY0, VITE_GEMINI_API_KEY1
 const geminiKeys: string[] = allEnvKeys
-    .filter(k => /^(VITE_)?GEMINI_API_KEY\d+$/.test(k))
+    .filter(k => /^(VITE_)?GEMINI_API_KEY\d*$/.test(k))
     .sort()
     .map(k => getEnv(k)!)
     .filter(v => !!v);
@@ -27,6 +29,11 @@ console.log(`[Gemini] Loaded ${geminiKeys.length} API key(s).`);
 const legacyKey = getEnv('API_KEY');
 if (geminiKeys.length === 0 && legacyKey) {
     geminiKeys.push(legacyKey);
+}
+// Fallback adicional: si no hay keys pero existe GEMINI_API_KEY directo
+if (geminiKeys.length === 0) {
+    const single = getEnv('GEMINI_API_KEY') || getEnv('VITE_GEMINI_API_KEY');
+    if (single) geminiKeys.push(single);
 }
 
 let currentKeyIndex = 0;

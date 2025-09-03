@@ -26,7 +26,11 @@ yarn-error.log*
 
 # local env files
 .env*.local
-.env
+.env*
+!.env.example
+
+# vite build
+dist/
 
 # vercel
 .vercel
@@ -34,3 +38,4 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+.gitignore
