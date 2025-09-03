@@ -1,0 +1,5 @@
+{
+  "name": "Test Solver",
+  "description": "Aplicación web inteligente para resolver exámenes de opción múltiple mediante estrategias avanzadas de mejora de precisión con la API de Gemini. Los usuarios pueden subir una imagen o pegar texto; la IA analizará, resolverá y mostrará las respuestas más probables con puntuaciones de confianza en un panel en tiempo real.",
+  "requestFramePermissions": []
+}
