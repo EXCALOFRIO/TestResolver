@@ -1,7 +1,7 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useRef } from 'react';
 import { AppState, Question, ResultsState, StrategyKey } from './types';
 import { STRATEGIES } from './constants';
-import { extractQuestionsFromImage, extractQuestionsFromText, getAndResetGeminiStats, multiModelBatchSolve } from './services/geminiService';
+import { extractQuestionsFromFile, extractQuestionsFromText, getAndResetGeminiStats, multiModelBatchSolve } from './services/geminiService';
 import { MODEL_CONFIGS } from './modelConfigs';
 import { ModelConfigPanel } from './components/ModelConfigPanel';
 import { InputArea } from './components/InputArea';
@@ -17,6 +17,9 @@ const App: React.FC = () => {
   const [activeModels, setActiveModels] = useState<Record<string, boolean>>(() => Object.fromEntries(MODEL_CONFIGS.map(m => [m.key, m.enabledByDefault !== false && m.enabledByDefault !== undefined ? m.enabledByDefault : false])));
   const [menuOpen, setMenuOpen] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  // Buffer global para votos en streaming (evita renders excesivos)
+  const pendingBatchRef = useRef<Record<number, { letter: string; label: string }[]>>({});
+  const flushTimeoutRef = useRef<number | null>(null);
   
   const processTest = useCallback(async (getQuestions: () => Promise<Question[]>) => {
     setError(null);
@@ -25,18 +28,35 @@ const App: React.FC = () => {
     setResults({});
 
     try {
-        const parsedQuestions = await getQuestions();
+        const rawQuestions = await getQuestions();
+        // Normalizar claves de opciones a letras para evitar desalineación (ej: '1','2' -> 'A','B')
+        const parsedQuestions: Question[] = rawQuestions.map(q => {
+          const keys = Object.keys(q.opciones);
+          const allLetters = keys.every(k => /^[A-Z]$/.test(k));
+          if (allLetters) return q;
+          const sorted = [...keys];
+          // si son números ordenamos numéricamente
+            if (sorted.every(k => /^\d+$/.test(k))) {
+              sorted.sort((a,b)=> parseInt(a,10)-parseInt(b,10));
+            }
+          const mapping: Record<string,string> = {};
+          sorted.forEach((orig, idx) => {
+            mapping[String.fromCharCode(65+idx)] = (q.opciones as any)[orig];
+          });
+          return { ...q, opciones: mapping };
+        });
         if (!parsedQuestions || parsedQuestions.length === 0) {
             throw new Error("No questions could be extracted.");
         }
         setQuestions(parsedQuestions);
 
-    const initialResults: ResultsState = {};
-  const activeModelKeys = MODEL_CONFIGS.filter(m => activeModels[m.key]).map(m => m.key);
-  // total esperado = nº de llamadas agregado (una respuesta por llamada por pregunta)
-  const totalExpected = MODEL_CONFIGS.filter(m => activeModels[m.key]).reduce((acc,m)=> acc + Math.max(m.maxPerTest || 0, 0), 0);
+  const initialResults: ResultsState = {};
+    const activeModelKeys = MODEL_CONFIGS.filter(m => activeModels[m.key]).map(m => m.key);
+    // total esperado = suma de maxPerTest de cada modelo activo
+    const totalExpected = MODEL_CONFIGS.filter(m => activeModels[m.key])
+      .reduce((acc,m)=> acc + (m.maxPerTest || 0) * (m.weight || 1), 0);
     parsedQuestions.forEach(q => {
-      initialResults[q.id] = { votes: {}, isResolved: false, expectedVotes: totalExpected };
+      initialResults[q.id] = { votes: {}, isResolved: false, expectedVotes: totalExpected, receivedVotes: 0 };
     });
         setResults(initialResults);
         
@@ -46,92 +66,112 @@ const App: React.FC = () => {
 
         // First run batch strategies to drastically cut API calls
         // siempre consumir máximos por modelo
+        // Reset buffer antes de iniciar
+        pendingBatchRef.current = {};
+        const flush = () => {
+          setResults(prev => {
+            if (!Object.keys(pendingBatchRef.current).length) return prev;
+            const next: ResultsState = { ...prev };
+            for (const [qidStr, arrRaw] of Object.entries(pendingBatchRef.current)) {
+              const arr = arrRaw as { letter: string; label: string }[];
+              const qid = Number(qidStr);
+              if (!next[qid]) continue;
+              const qr: any = { ...next[qid] };
+              qr.votes = { ...(qr.votes || {}) };
+              let addedWeighted = 0;
+              for (let i=0; i<arr.length; i++) {
+                const { letter, label } = arr[i];
+                if (!qr.votes[letter]) qr.votes[letter] = [];
+                (qr.votes[letter] as string[]).push(label);
+                // peso por modelo (label formato modelKey:iter)
+                if (label === 'fallback') addedWeighted += 1; else {
+                  const mk = label.split(':')[0];
+                  const cfg = MODEL_CONFIGS.find(m=> m.key === mk);
+                  addedWeighted += (cfg?.weight || 1);
+                }
+              }
+              if (addedWeighted) {
+                qr.receivedVotes = (qr.receivedVotes || 0) + addedWeighted; // ahora representa votos ponderados acumulados
+                let leader=''; let leaderWeighted=-1;
+                for (const [opt, list] of Object.entries(qr.votes)) {
+                  const w = (list as string[]).reduce((s,l)=> {
+                    if (l==='fallback') return s+1;
+                    const mk = l.split(':')[0];
+                    const cfg = MODEL_CONFIGS.find(m=> m.key === mk);
+                    return s + (cfg?.weight || 1);
+                  },0);
+                  if (w>leaderWeighted) { leaderWeighted = w; leader = opt; }
+                }
+                qr.finalAnswer = leader || qr.finalAnswer;
+                qr.confidence = (leaderWeighted / (qr.expectedVotes || 1)) * 100;
+                if ((qr.receivedVotes || 0) >= (qr.expectedVotes || 0)) qr.isResolved = true;
+                next[qid] = qr;
+              }
+            }
+            pendingBatchRef.current = {};
+            return next;
+          });
+          if (flushTimeoutRef.current !== null) {
+            flushTimeoutRef.current = null;
+          }
+        };
+        const scheduleFlush = () => {
+          if (flushTimeoutRef.current !== null) return;
+          flushTimeoutRef.current = window.setTimeout(flush, 80);
+        };
+
         const answers = await multiModelBatchSolve(
           parsedQuestions,
           StrategyKey.BASE,
           activeModelKeys,
-          ({ answers }) => {
-            // actualización incremental
+          ({ answers, modelKey, iteration }) => {
             Object.entries(answers).forEach(([idStr, letter]) => {
-              const id = Number(idStr);
-              setResults(prev => {
-                if (!prev[id]) return prev; // guard: si llega id desconocido
-                const newResults = JSON.parse(JSON.stringify(prev));
-                const qr = newResults[id];
-                qr.votes = qr.votes || {}; // guard extra
-                if (!qr.votes[letter]) qr.votes[letter] = [];
-                qr.votes[letter].push('v');
-                // recalcular provisional
-                const totalVotes = Object.values(qr.votes).reduce((acc: number, v: any)=> acc + v.length, 0);
-                let maxVotes = 0; let leader = '';
-                for (const [k,vArr] of Object.entries(qr.votes)) {
-                  if ((vArr as string[]).length > maxVotes) { maxVotes = (vArr as string[]).length; leader = k; }
-                }
-                qr.finalAnswer = leader || undefined;
-                qr.confidence = (maxVotes / (qr.expectedVotes || 1)) * 100;
-                if (totalVotes === qr.expectedVotes) qr.isResolved = true;
-                return newResults;
-              });
+              const list = pendingBatchRef.current[idStr] || (pendingBatchRef.current[idStr] = []);
+              list.push({ letter, label: `${modelKey || 'm'}:${iteration || 1}` });
             });
+            scheduleFlush();
           },
           { concurrent: true }
         );
-        // Al terminar (answers contiene arrays completos) aplicamos consolidación final por si falta algo
-        Object.entries(answers).forEach(([idStr, voteList]) => {
-          const id = Number(idStr);
-          const arr: string[] = Array.isArray(voteList) ? (voteList as any) : [voteList as any];
-          setResults(prev => {
-            if (!prev[id]) return prev; // guard contra id inexistente
-            const newResults = JSON.parse(JSON.stringify(prev));
-            const qr = newResults[id];
-            qr.votes = qr.votes || {};
-            const existingCount = Object.values(qr.votes).reduce<number>((acc, v: any)=> acc + (v as string[]).length, 0);
-            if (existingCount < arr.length) {
-              const deficit = arr.length - existingCount;
-              for (let i=0; i<deficit; i++) {
-                const letter = arr[i % arr.length];
-                if (!qr.votes[letter]) qr.votes[letter] = [];
-                qr.votes[letter].push('v');
-              }
-            }
-            const totalVotes = Object.values(qr.votes).reduce((acc: number, v: any)=> acc + v.length, 0);
-            if (totalVotes === qr.expectedVotes) {
-              qr.isResolved = true;
-              let maxVotes = 0; let finalAnswer = '';
-              for (const [k,vArr] of Object.entries(qr.votes)) {
-                if ((vArr as string[]).length > maxVotes) { maxVotes = (vArr as string[]).length; finalAnswer = k; }
-              }
-              qr.finalAnswer = finalAnswer;
-              qr.confidence = (maxVotes / (qr.expectedVotes || 1)) * 100;
-            }
-            return newResults;
-          });
-        });
+        // Asegurar flush final
+  flush();
 
-        // Finalize each question's aggregated result
+        // Finalize: garantizar que cada pregunta alcance expectedVotes añadiendo fallbacks si faltan
         setResults(prev => {
           const newResults = JSON.parse(JSON.stringify(prev));
           for (const q of parsedQuestions) {
-            const qr = newResults[q.id];
-            if (!qr) continue; // guard adicional
-            const totalVotes = Object.values(qr.votes).reduce((acc: number, v)=> acc + (v as string[]).length, 0);
-            if (totalVotes === (qr.expectedVotes || 0)) {
-              qr.isResolved = true;
-              let maxVotes = 0; let finalAnswer = '';
-              for (const [key, voters] of Object.entries(qr.votes)) {
-        if ((voters as string[]).length > maxVotes) { maxVotes = (voters as string[]).length; finalAnswer = key; }
+            const qr = newResults[q.id]; if (!qr) continue;
+            const expected: number = Number(qr.expectedVotes || 0);
+            const weightOf = (lab: string): number => {
+              if (lab==='fallback') return 1;
+              const mk = lab.split(':')[0];
+              const cfg = MODEL_CONFIGS.find(m=> m.key === mk);
+              return cfg?.weight || 1;
+            };
+            let currentWeighted: number = Object.values(qr.votes).reduce<number>((acc, list) => {
+              const arr = list as string[];
+              const w = arr.reduce((s,l)=> s+weightOf(l),0);
+              return acc + w;
+            }, 0);
+            if (expected > 0 && currentWeighted < expected) {
+              const optionKeys = Object.keys(q.opciones);
+              let i=0; // rellenar con fallbacks peso=1
+              while (currentWeighted < expected && i < 10000) {
+                const letter = optionKeys[i % optionKeys.length];
+                qr.votes[letter] = qr.votes[letter] || [];
+                (qr.votes[letter] as string[]).push('fallback');
+                currentWeighted += 1; i++;
               }
-              qr.finalAnswer = finalAnswer;
-              qr.confidence = (maxVotes / (qr.expectedVotes || 1)) * 100;
-            } else {
-              // progreso parcial: tomar líder / total esperado
-              let maxVotes = 0; let leader = '';
-              for (const [key, voters] of Object.entries(qr.votes)) {
-                if ((voters as string[]).length > maxVotes) { maxVotes = (voters as string[]).length; leader = key; }
-              }
-              qr.finalAnswer = leader || undefined;
-              qr.confidence = (maxVotes / (qr.expectedVotes || 1)) * 100;
             }
+            qr.receivedVotes = currentWeighted; // reinterpretado como acumulado ponderado
+            let leader=''; let leaderWeighted=-1;
+            for (const [opt, arr] of Object.entries(qr.votes)) {
+              const w = (arr as string[]).reduce((s,l)=> s+weightOf(l),0);
+              if (w>leaderWeighted) { leaderWeighted = w; leader = opt; }
+            }
+            qr.finalAnswer = leader || undefined;
+            qr.confidence = (leaderWeighted / (qr.expectedVotes || 1)) * 100;
+            if (currentWeighted >= (qr.expectedVotes || 0)) qr.isResolved = true;
           }
           return newResults;
         });
@@ -169,8 +209,8 @@ const App: React.FC = () => {
     }
   }, [activeModels]);
 
-  const handleImageSubmit = useCallback((imageData: string) => {
-    processTest(() => extractQuestionsFromImage(imageData));
+  const handleFileSubmit = useCallback((dataUrl: string) => {
+    processTest(() => extractQuestionsFromFile(dataUrl));
   }, [processTest]);
 
   const handleTextSubmit = useCallback((text: string) => {
@@ -220,7 +260,7 @@ const App: React.FC = () => {
 
         {appState === AppState.IDLE && (
             <div className="space-y-8">
-              <InputArea onImageSubmit={handleImageSubmit} onTextSubmit={handleTextSubmit} isLoading={isLoading}/>
+              <InputArea onFileSubmit={handleFileSubmit} onTextSubmit={handleTextSubmit} isLoading={isLoading}/>
             </div>
         )}
         

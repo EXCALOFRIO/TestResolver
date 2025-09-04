@@ -38,6 +38,7 @@ export interface QuestionResult {
   confidence?: number;
   isResolved: boolean;
   expectedVotes?: number; // total esperado = estrategias * iteraciones
+  receivedVotes?: number; // votos realmente recibidos (para progreso robusto)
 }
 
 // Métricas por iteración para análisis en /admin

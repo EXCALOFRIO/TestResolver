@@ -1,5 +1,11 @@
 import { Question, QuestionMeta } from '../types';
 
+/**
+ * AVISO: Este parser heurístico ha sido DEPRECADADO. El flujo actual usa siempre
+ * Gemini (structured output) para la extracción de preguntas. Se mantiene el
+ * código por si en el futuro se desea un modo offline, pero no debe llamarse.
+ */
+
 interface OptionBlock {
   lines: string[];
   startIndex: number;
@@ -47,37 +53,116 @@ class StructuralQuestionParser {
   }
 
   public parse(): Question[] {
+    // 1) Intento estándar basado en bloques de opciones
     const optionBlocks = this.findOptionBlocks();
-    if (optionBlocks.length === 0) {
-        // Si no encontramos bloques de opciones, intentamos un salvamento global
-        return this.salvageEntireText();
+    let questions: Question[] = [];
+    if (optionBlocks.length) {
+      let lastBlockEnd = -1;
+      let id = 1;
+      for (const block of optionBlocks) {
+        const statementStartIndex = lastBlockEnd + 1;
+        const statementEndIndex = block.startIndex;
+        const statementLines = this.lines.slice(statementStartIndex, statementEndIndex);
+        const statementText = statementLines.join(' ').trim();
+        if (!statementText) continue;
+        const { opciones } = this.parseOptionsFromBlock(block);
+        if (Object.keys(opciones).length < 2) continue;
+        let question = this.buildQuestion(id, statementText, opciones);
+        question = this.enrichQuestion(question);
+        questions.push(question);
+        lastBlockEnd = block.endIndex;
+        id++;
+      }
     }
-    const questions: Question[] = [];
-    let lastBlockEnd = -1;
-    let id = 1;
 
-    for (const block of optionBlocks) {
-      const statementStartIndex = lastBlockEnd + 1;
-      const statementEndIndex = block.startIndex;
-      
-      const statementLines = this.lines.slice(statementStartIndex, statementEndIndex);
-      const statementText = statementLines.join(' ').trim();
-      
-      if (!statementText) continue; // Bloque de opciones sin enunciado previo, probablemente basura.
+    // 2) Si no hubo resultados, intentar formato "Número X." con opciones separadas por líneas en blanco
+    if (!questions.length) {
+      const enumerated = this.parseEnumeratedNumberFormat();
+      if (enumerated.length) questions = enumerated;
+    }
 
-      const { opciones } = this.parseOptionsFromBlock(block);
-      if (Object.keys(opciones).length < 2) continue;
-
-      let question = this.buildQuestion(id, statementText, opciones);
-      question = this.enrichQuestion(question);
-
-      questions.push(question);
-      lastBlockEnd = block.endIndex;
-      id++;
+    // 3) Si aún nada, salvamento total
+    if (!questions.length) {
+      questions = this.salvageEntireText();
     }
 
     try { (window as any).__parserDebug = { text: this.text, blocks: optionBlocks, questions }; } catch(_) {}
+    return questions;
+  }
 
+  /**
+   * Parser adicional para el formato:
+   * "Número 29."\n
+   * Enunciado (una o varias líneas) que termina normalmente en ':'
+   * (línea en blanco)
+   * Opción 1.
+   * (línea en blanco)
+   * Opción 2.
+   * ... hasta la siguiente cabecera "Número N." o fin.
+   */
+  private parseEnumeratedNumberFormat(): Question[] {
+    const headerRegex = /^n[úu]mero\s+\d+\./i;
+    const headerIndexes: number[] = [];
+    for (let i = 0; i < this.lines.length; i++) {
+      if (headerRegex.test(this.lines[i])) headerIndexes.push(i);
+    }
+    if (!headerIndexes.length) return [];
+
+    const questions: Question[] = [];
+    for (let h = 0; h < headerIndexes.length; h++) {
+      const start = headerIndexes[h];
+      const end = h + 1 < headerIndexes.length ? headerIndexes[h + 1] - 1 : this.lines.length - 1;
+      const chunk = this.lines.slice(start, end + 1);
+      if (chunk.length < 2) continue;
+      // Quitar la línea de cabecera
+      const body = chunk.slice(1);
+
+      // Encontrar la última línea del enunciado: la primera que contenga ':' o, si no hay, la primera línea vacía.
+      let enunciadoEndIdx = -1;
+      for (let i = 0; i < body.length; i++) {
+        if (body[i].includes(':')) { enunciadoEndIdx = i; break; }
+      }
+      if (enunciadoEndIdx === -1) {
+        // fallback: hasta primera línea en blanco
+        for (let i = 0; i < body.length; i++) { if (!body[i].trim()) { enunciadoEndIdx = i - 1; break; } }
+        if (enunciadoEndIdx === -1) enunciadoEndIdx = Math.min(2, body.length - 1); // limitar
+      }
+      const statementLines = body.slice(0, enunciadoEndIdx + 1).filter(l => l.trim());
+      const afterStatement = body.slice(enunciadoEndIdx + 1);
+      if (!statementLines.length) continue;
+
+      // Agrupar opciones por párrafos separados por al menos una línea en blanco
+      const opciones: Record<string, string> = {};
+      const paragraphs: string[] = [];
+      let buffer: string[] = [];
+      const flush = () => {
+        if (buffer.length) {
+          const text = buffer.join(' ').trim();
+            if (text) paragraphs.push(text);
+          buffer = [];
+        }
+      };
+      for (const line of afterStatement) {
+        if (!line.trim()) { flush(); continue; }
+        // Si detectamos el inicio de otra pregunta antes de acabar de recolectar, abortamos este chunk.
+        if (headerRegex.test(line)) { flush(); break; }
+        buffer.push(line.trim());
+      }
+      flush();
+
+      if (paragraphs.length >= 2 && paragraphs.length <= 12) {
+        paragraphs.forEach((p, idx) => {
+          const key = String.fromCharCode(65 + idx);
+          // Limpiar posibles numeraciones residuales dentro de la opción
+          const clean = p.replace(/^([a-jA-J]|\d{1,2})[\)\.:\-]\s*/, '').trim();
+          opciones[key] = clean;
+        });
+      }
+      if (Object.keys(opciones).length < 2) continue;
+      const statement = statementLines.join(' ').trim().replace(/[:：]\s*$/,'');
+      const q: Question = this.enrichQuestion(this.buildQuestion(questions.length + 1, statement, opciones));
+      questions.push(q);
+    }
     return questions;
   }
   

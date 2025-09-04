@@ -4,25 +4,27 @@ import { ImageIcon } from './icons/ImageIcon';
 import { TextIcon } from './icons/TextIcon';
 
 interface InputAreaProps {
-  onImageSubmit: (imageData: string) => void;
+  onFileSubmit: (dataUrl: string) => void;
   onTextSubmit: (text: string) => void;
   isLoading: boolean;
 }
 
-export const InputArea: React.FC<InputAreaProps> = ({ onImageSubmit, onTextSubmit, isLoading }) => {
-  const [inputType, setInputType] = useState<'image' | 'text'>('image');
+export const InputArea: React.FC<InputAreaProps> = ({ onFileSubmit, onTextSubmit, isLoading }) => {
+  const [inputType, setInputType] = useState<'file' | 'text'>('file');
   const [textValue, setTextValue] = useState('');
   const [dragOver, setDragOver] = useState(false);
 
   const handleFileChange = useCallback((file: File | null) => {
-    if (file && file.type.startsWith('image/')) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        onImageSubmit(reader.result as string);
-      };
-      reader.readAsDataURL(file);
-    }
-  }, [onImageSubmit]);
+    if (!file) return;
+    // Aceptamos imágenes o PDFs
+    const isSupported = file.type.startsWith('image/') || file.type === 'application/pdf';
+    if (!isSupported) return;
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      onFileSubmit(reader.result as string);
+    };
+    reader.readAsDataURL(file);
+  }, [onFileSubmit]);
 
   const onDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -43,15 +45,15 @@ export const InputArea: React.FC<InputAreaProps> = ({ onImageSubmit, onTextSubmi
     <div className="w-full max-w-4xl mx-auto bg-slate-800/30 backdrop-blur-md rounded-2xl p-6 lg:p-8 border border-slate-700/60 shadow-2xl">
       <div className="flex mb-6 border-b border-slate-700/50">
         <button
-          onClick={() => setInputType('image')}
+          onClick={() => setInputType('file')}
           className={`px-6 py-3 text-sm font-semibold transition-all duration-300 flex items-center gap-2 ${
-            inputType === 'image' 
+            inputType === 'file' 
               ? 'text-indigo-400 border-b-2 border-indigo-400 bg-indigo-500/10' 
               : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/30'
           } rounded-t-lg`}
         >
           <ImageIcon className="w-4 h-4" />
-          Subir Imagen
+          Subir Archivo (Imagen/PDF)
         </button>
         <button
           onClick={() => setInputType('text')}
@@ -66,7 +68,7 @@ export const InputArea: React.FC<InputAreaProps> = ({ onImageSubmit, onTextSubmi
         </button>
       </div>
 
-      {inputType === 'image' ? (
+  {inputType === 'file' ? (
         <div 
           onDrop={onDrop}
           onDragOver={onDragOver}
@@ -78,7 +80,7 @@ export const InputArea: React.FC<InputAreaProps> = ({ onImageSubmit, onTextSubmi
             id="file-upload"
             className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
             onChange={(e) => handleFileChange(e.target.files ? e.target.files[0] : null)}
-            accept="image/*"
+            accept="image/*,application/pdf"
             disabled={isLoading}
           />
           <div className="text-center space-y-4">
@@ -91,7 +93,7 @@ export const InputArea: React.FC<InputAreaProps> = ({ onImageSubmit, onTextSubmi
               <p className="text-lg font-semibold text-slate-200">
                 <span className="text-indigo-400">Haz clic para subir</span> o arrastra y suelta
               </p>
-              <p className="text-sm text-slate-400 mt-2">PNG, JPG, GIF hasta 10MB</p>
+              <p className="text-sm text-slate-400 mt-2">Imágenes (PNG/JPG) o PDF hasta 20MB</p>
             </div>
           </div>
         </div>
