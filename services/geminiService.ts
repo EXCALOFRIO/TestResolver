@@ -10,24 +10,58 @@ import { parseQuestionsHeuristically } from './localParser';
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 declare const process: any;
 
-// Helper to safely get env values (works both in node and Vite build-time replacement)
+// Helper to safely get env values (works both in node y build-time Vite)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const getEnv = (k: string): string | undefined => (typeof process !== 'undefined' && process?.env?.[k]) || (import.meta as any)?.env?.[k];
+
+// ---- Logging helper (niveles: error=0, warn=1, info=2, debug=3) ----
+type LogLevel = 'error' | 'warn' | 'info' | 'debug';
+const levelRank: Record<LogLevel, number> = { error:0, warn:1, info:2, debug:3 };
+const configuredLevel = ((): LogLevel => {
+    const raw = (getEnv('VITE_GEMINI_LOG_LEVEL') || getEnv('GEMINI_LOG_LEVEL') || 'info').toLowerCase();
+    if (raw === 'debug' || raw === 'info' || raw === 'warn' || raw === 'error') return raw as LogLevel;
+    return 'info';
+})();
+const gLog = (lvl: LogLevel, msg: string, ...rest: unknown[]) => {
+    if (levelRank[lvl] <= levelRank[configuredLevel]) {
+        const fn = lvl === 'error' ? console.error : lvl === 'warn' ? console.warn : console.log;
+        fn(msg, ...rest);
+    }
+};
 
 // -------- API Key Rotation Logic --------
 // Collect keys GEMINI_API_KEY0..9 (flexible) from env.
 const allEnvKeys: string[] = typeof process !== 'undefined' && process?.env ? Object.keys(process.env) : Object.keys((import.meta as any)?.env || {});
-const geminiKeys: string[] = allEnvKeys
-    .filter(k => /^(VITE_)?GEMINI_API_KEY\d+$/.test(k))
+// Acepta GEMINI_API_KEY, GEMINI_API_KEY0..9 y prefijos VITE_. Además, si el build embebió
+// un array global __GEMINI_EMBED_KEYS__ (caso variables sin prefijo en Vercel) lo usamos.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+declare const __GEMINI_EMBED_KEYS__: any;
+let geminiKeys: string[] = allEnvKeys
+    .filter(k => /^(VITE_)?GEMINI_API_KEY\d*$/.test(k))
     .sort()
     .map(k => getEnv(k)!)
     .filter(v => !!v);
-console.log(`[Gemini] Loaded ${geminiKeys.length} API key(s).`);
+// Fallback embed (inyección desde vite.config) solo si no se recogieron claves directas
+if (typeof __GEMINI_EMBED_KEYS__ !== 'undefined' && Array.isArray(__GEMINI_EMBED_KEYS__) && __GEMINI_EMBED_KEYS__.length && geminiKeys.length === 0) {
+    geminiKeys.push(...__GEMINI_EMBED_KEYS__.filter((x: unknown) => typeof x === 'string' && x));
+}
 
 const legacyKey = getEnv('API_KEY');
 if (geminiKeys.length === 0 && legacyKey) {
     geminiKeys.push(legacyKey);
 }
+// Fallback adicional: si no hay keys pero existe GEMINI_API_KEY directo
+if (geminiKeys.length === 0) {
+    const single = getEnv('GEMINI_API_KEY') || getEnv('VITE_GEMINI_API_KEY');
+    if (single) geminiKeys.push(single);
+}
+if (geminiKeys.length === 0) {
+    const viteKeys = allEnvKeys.filter(k => /^VITE_GEMINI_API_KEY\d*$/.test(k)).sort().map(k => getEnv(k)!).filter(Boolean);
+    if (viteKeys.length) geminiKeys.push(...viteKeys);
+}
+// Deduplicar y log limpio (evitamos mostrar conteo bruto para no confundir)
+geminiKeys = Array.from(new Set(geminiKeys));
+gLog('info', `[Gemini] API keys activas: ${geminiKeys.length} | Rotación=${geminiKeys.length > 1 ? 'ON' : 'OFF'}`);
 
 let currentKeyIndex = 0;
 
@@ -47,7 +81,7 @@ const rotateKey = () => {
     if (geminiKeys.length <= 1) return false;
     currentKeyIndex = (currentKeyIndex + 1) % geminiKeys.length;
     ai = buildClient();
-    console.warn(`[Gemini] Rotated API key. Using index ${currentKeyIndex}.`);
+    gLog('debug', `[Gemini] Rotación de clave -> índice activo ${currentKeyIndex}`);
     return true;
 };
 
@@ -90,7 +124,7 @@ const withRetry = async <T>(fn: () => Promise<T>, operationLabel: string, modelN
             const status = err?.error?.status || err?.status || err?.code;
             const isRateLimit = status === 429 || status === 'RESOURCE_EXHAUSTED' || err?.error?.status === 'RESOURCE_EXHAUSTED';
             if (isRateLimit) {
-                console.warn(`[Gemini][${operationLabel}] Rate limited (attempt ${attempt}/${maxAttempts}).`);
+                gLog('debug', `[Gemini][${operationLabel}] Rate limit recibido (intento ${attempt}/${maxAttempts}). Reintentando con posible rotación...`);
                 const rotated = rotateKey();
                 if (rotated) geminiStats.rotations++;
                 if (attempt >= maxAttempts) throw err;

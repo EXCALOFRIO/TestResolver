@@ -14,7 +14,7 @@ Características principales
 Estado actual
 ------------
 - Funcionalidad principal de extracción y resolución está implementada.
-- La página de "Evaluación" (`/eval`) fue eliminada del UI en esta rama; si la necesitas, existe historial de commits para restaurarla.
+ - Funcionalidad principal de extracción y resolución está implementada.
 
 Requisitos
 ----------
@@ -54,22 +54,6 @@ Scripts disponibles (desde `package.json`)
 Configuración de API (Gemini / @google/genai)
 -------------------------------------------
 El proyecto usa `@google/genai` para llamadas al modelo. Proporciona las credenciales según la documentación de `@google/genai` o tu proveedor (por ejemplo, variables de entorno o fichero de credenciales). No se incluyen claves en el repositorio.
-
-Estructura relevante
---------------------
-- `src/` ó raíz: componentes React y páginas.
-- `components/` — componentes UI (Charts, InputArea, etc.).
-- `services/` — lógica para extracción y llamadas a Gemini (`geminiService.ts`, `localParser.ts`).
-- `modelConfigs.ts`, `constants.ts`, `types.ts` — configuración y tipos.
-
-Notas importantes
------------------
-- Se eliminaron referencias a la ruta `/eval` y el archivo `EvaluationPage.tsx` en esta rama por petición del mantenedor. Si ves referencias en archivos compilados (`dist/`), regenera el `build` para actualizar los artefactos.
-- No se encontraron comandos de PowerShell en el código fuente que necesiten ser borrados.
-
-Contribuir
----------
-Si quieres colaborar, abre un issue o envía un PR; mantén cambios pequeños y añade descripciones claras.
 
 Licencia
 --------
