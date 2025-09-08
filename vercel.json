@@ -1,10 +1,9 @@
 {
   "version": 2,
-  "framework": null,
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "functions": {
-    "api/**": {
+    "api/express.js": {
       "runtime": "nodejs20.x",
       "maxDuration": 30
     }
