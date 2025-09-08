@@ -269,6 +269,14 @@ app.post('/api/ai/solve', auth, async (req, res) => {
   }
 });
 
+// En entornos serverless (Vercel) no arrancamos un listener; exportamos la app
+// Vercel expone las funciones bajo /api/*; tendremos un handler que delega en `app`.
 ensureSchema().then(() => {
-  app.listen(PORT, () => console.log(`[server] listening on http://localhost:${PORT}`));
+  if (!process.env.VERCEL) {
+    app.listen(PORT, () => console.log(`[server] listening on http://localhost:${PORT}`));
+  } else {
+    console.log('[server] running in Vercel serverless mode - not starting http listener');
+  }
 });
+
+export default app;
