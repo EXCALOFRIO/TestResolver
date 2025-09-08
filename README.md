@@ -57,7 +57,20 @@ El proyecto usa `@google/genai` para llamadas al modelo. Proporciona las credenc
 
 Despliegue en Vercel
 --------------------
-Este repo incluye funciones serverless bajo `api/` y un archivo `vercel.json` (si no existe créalo) para garantizar un catch‑all `api/[...all].js` que enruta todas las peticiones `/api/*` a Express.
+Ahora todas las rutas backend son funciones serverless puras (sin Express):
+
+```
+api/health.js
+api/auth/register.js
+api/auth/login.js
+api/apikey/index.js (GET/POST)
+api/ai/extract.js
+api/ai/solve.js
+```
+
+Código común reutilizable en `api/_*.js`.
+
+No existe ya un catch-all; Vercel asigna cada archivo a `/api/...` automáticamente.
 
 Variables de entorno necesarias en el panel de Vercel (Production / Preview / Development):
 
