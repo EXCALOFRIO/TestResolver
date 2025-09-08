@@ -1,13 +1,14 @@
-import React, { useState, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { AppState, Question, ResultsState, StrategyKey } from './types';
 import { STRATEGIES } from './constants';
-import { extractQuestionsFromFile, extractQuestionsFromText, getAndResetGeminiStats, multiModelBatchSolve } from './services/geminiService';
+import { extractQuestionsFromFile, extractQuestionsFromFiles, extractQuestionsFromText, extractQuestionsFromMixed, getAndResetGeminiStats, multiModelBatchSolve } from './services/geminiService';
 import { MODEL_CONFIGS } from './modelConfigs';
-import { ModelConfigPanel } from './components/ModelConfigPanel';
+import { UnifiedPanel } from './components/UnifiedPanel';
 import { InputArea } from './components/InputArea';
 import { ResultsDashboard } from './components/ResultsDashboard';
 import { SparklesIcon } from './components/icons/SparklesIcon';
-import { GearIcon } from './components/icons/GearIcon';
+import { ApiKeyGate } from './components/ApiKeyGate';
+import { validateAnyStoredUserKey } from './services/keyUtils';
 
 const App: React.FC = () => {
   const [appState, setAppState] = useState<AppState>(AppState.IDLE);
@@ -16,12 +17,51 @@ const App: React.FC = () => {
   const allStrategies: StrategyKey[] = STRATEGIES.map(s => s.key); // mantenido por compat
   const [activeModels, setActiveModels] = useState<Record<string, boolean>>(() => Object.fromEntries(MODEL_CONFIGS.map(m => [m.key, m.enabledByDefault !== false && m.enabledByDefault !== undefined ? m.enabledByDefault : false])));
   const [menuOpen, setMenuOpen] = useState<boolean>(false);
+  const [userEmail, setUserEmail] = useState<string>('');
+  const [needsKeyGate, setNeedsKeyGate] = useState<boolean>(false);
+  const [gateError, setGateError] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   // Buffer global para votos en streaming (evita renders excesivos)
   const pendingBatchRef = useRef<Record<number, { letter: string; label: string }[]>>({});
   const flushTimeoutRef = useRef<number | null>(null);
   
+  // Gate de autenticación/API Key al montar: si falta token o email, mostrar gate inmediatamente.
+  useEffect(() => {
+    try {
+      const token = localStorage.getItem('authToken');
+      const email = localStorage.getItem('authEmail') || '';
+      if (email) setUserEmail(email);
+      if (!token || !email) {
+        // No autenticado -> mostrar gate (paso 1 UI)
+        setNeedsKeyGate(true);
+        return;
+      }
+      // Autenticado; si no hay ninguna key almacenada aún, mostrar gate para step 3 (API key)
+      let hasKeys = false;
+      try {
+        const raw = localStorage.getItem('userKeys') || '[]';
+        const arr = JSON.parse(raw);
+        hasKeys = Array.isArray(arr) && arr.length > 0;
+      } catch {}
+      setNeedsKeyGate(!hasKeys);
+    } catch {
+      setNeedsKeyGate(true);
+    }
+  }, []);
+
+  const ensureValidKeyOrGate = async (): Promise<boolean> => {
+    const ok = await validateAnyStoredUserKey();
+    if (!ok) {
+      setGateError('Tu API key no es válida o ha expirado. Por favor, añade una clave válida.');
+      setNeedsKeyGate(true);
+      return false;
+    }
+    return true;
+  };
+
   const processTest = useCallback(async (getQuestions: () => Promise<Question[]>) => {
+    const hasKey = await ensureValidKeyOrGate();
+    if (!hasKey) return;
     setError(null);
     setAppState(AppState.PARSING);
     setQuestions([]);
@@ -213,8 +253,35 @@ const App: React.FC = () => {
     processTest(() => extractQuestionsFromFile(dataUrl));
   }, [processTest]);
 
+  const handleFilesSubmit = useCallback((dataUrls: string[]) => {
+    // Convertir dataUrls a formato { base64, mimeType }
+    const toSource = (du: string) => {
+      const m = du.match(/^data:(.+?);base64,(.+)$/);
+      if (!m) return null;
+      return { mimeType: m[1], base64: m[2] };
+    };
+    processTest(async () => {
+      const sources = dataUrls.map(toSource).filter(Boolean) as { base64: string; mimeType: string }[];
+      // Reusar extractQuestionsFromFiles (ya maneja subida/grandes)
+      return await extractQuestionsFromFiles(sources);
+    });
+  }, [processTest]);
+
   const handleTextSubmit = useCallback((text: string) => {
     processTest(() => extractQuestionsFromText(text));
+  }, [processTest]);
+
+  // Nuevo: manejo mixto (texto + imágenes/PDF simultáneamente)
+  const handleMixedSubmit = useCallback((payload: { text: string; dataUrls: string[] }) => {
+    const toSource = (du: string) => {
+      const m = du.match(/^data:(.+?);base64,(.+)$/);
+      if (!m) return null;
+      return { mimeType: m[1], base64: m[2] };
+    };
+    processTest(async () => {
+      const sources = (payload.dataUrls || []).map(toSource).filter(Boolean) as { base64: string; mimeType: string }[];
+      return await extractQuestionsFromMixed(payload.text || '', sources);
+    });
   }, [processTest]);
   
   const isLoading = useMemo(() => appState === AppState.PARSING || appState === AppState.SOLVING, [appState]);
@@ -232,100 +299,135 @@ const App: React.FC = () => {
     // rutas personalizadas eliminadas en esta rama
   }
 
+  const handleAuthenticated = () => {
+    const email = localStorage.getItem('authEmail') || '';
+    if (email) setUserEmail(email);
+    // Comprobar si ya existe alguna key guardada para decidir si cerrar
+    let hasKeys = false;
+    try {
+      const raw = localStorage.getItem('userKeys') || '[]';
+      const arr = JSON.parse(raw);
+      hasKeys = Array.isArray(arr) && arr.length > 0;
+    } catch {}
+    setNeedsKeyGate(!hasKeys);
+  };
+
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 text-slate-100 relative overflow-hidden">
-      {/* Efectos de fondo */}
-      <div className="absolute inset-0 bg-[radial-gradient(ellipse_80%_80%_at_50%_-20%,rgba(120,119,198,0.3),rgba(255,255,255,0))]"></div>
-      <div className="absolute top-0 left-1/4 w-72 h-72 bg-purple-500/10 rounded-full blur-3xl"></div>
-      <div className="absolute bottom-0 right-1/4 w-96 h-96 bg-indigo-500/10 rounded-full blur-3xl"></div>
+  <div className="min-h-screen text-slate-100 relative overflow-hidden flex flex-col bg-[radial-gradient(1200px_600px_at_50%_-200px,rgba(120,119,198,0.6),transparent)] from-slate-800 to-slate-900 bg-gradient-to-b">
       
-      <div className="relative z-10 min-h-screen p-4 sm:p-6 lg:p-8">
-  <main className={`container mx-auto max-w-6xl transition-all duration-300 ${menuOpen ? 'pr-0 md:pr-80' : ''}`}>
-          <header className="text-center mb-8 lg:mb-12 pt-20">
-            <h1 className="text-4xl sm:text-5xl lg:text-6xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 flex items-center justify-center gap-3 mb-2">
-              <SparklesIcon className="w-10 h-10 lg:w-12 lg:h-12 text-indigo-400" />
-              TestResolver
-            </h1>
-          </header>
-        
-        {error && (
-            <div className="max-w-2xl mx-auto bg-gradient-to-r from-red-500/20 to-pink-500/20 border border-red-500/60 text-red-200 px-6 py-4 rounded-xl mb-8 text-center backdrop-blur-sm shadow-lg">
-                <div className="flex items-center justify-center gap-2 mb-2">
-                  <div className="w-2 h-2 bg-red-400 rounded-full animate-pulse"></div>
-                  <span className="font-semibold">Error</span>
-                </div>
-                {error}
-            </div>
-        )}
-
-        {appState === AppState.IDLE && (
-            <div className="space-y-8">
-              <InputArea onFileSubmit={handleFileSubmit} onTextSubmit={handleTextSubmit} isLoading={isLoading}/>
-            </div>
-        )}
-        
-        {(appState === AppState.PARSING || appState === AppState.SOLVING) && (
-            <div className="text-center py-16">
-                <div className="inline-flex items-center justify-center mb-6">
-                   <svg className="animate-spin -ml-1 mr-3 h-12 w-12 text-indigo-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                </div>
-                <h2 className="text-2xl lg:text-3xl font-bold text-slate-200 mb-4">
-                  {appState === AppState.PARSING ? 'Analizando y extrayendo preguntas...' : 'Resolviendo con modelos...'}
-                </h2>
-                <p className="text-slate-400 text-lg">Por favor espera mientras procesamos tu test...</p>
-                <div className="mt-8 flex items-center justify-center gap-2">
-                  <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce"></div>
-                  <div className="w-2 h-2 bg-purple-500 rounded-full animate-bounce" style={{animationDelay: '0.1s'}}></div>
-                  <div className="w-2 h-2 bg-pink-500 rounded-full animate-bounce" style={{animationDelay: '0.2s'}}></div>
-                </div>
-            </div>
-        )}
-
-        {questions.length > 0 && (appState === AppState.SOLVING || appState === AppState.RESULTS) && (
-           <div className="space-y-8">
-             <ResultsDashboard questions={questions} results={results} />
-             {appState === AppState.RESULTS && (
-                <div className="text-center">
-                  <button
-                    onClick={resetApp}
-                    className="bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold py-3 px-8 rounded-xl transition-all duration-300 hover:scale-105 shadow-lg shadow-indigo-900/30"
-                  >
-                    Resolver otro test
-                  </button>
-                </div>
-              )}
-           </div>
-        )}
-        
-        {!menuOpen && (
-          <button 
-            onClick={()=>setMenuOpen(true)} 
-            className="fixed top-8 right-6 z-50 group bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white p-3 rounded-full shadow-2xl shadow-indigo-900/40 transition-all duration-300 hover:scale-110 backdrop-blur-sm border border-white/10"
-            aria-label="Abrir configuración de modelos"
+      {/* Header fijo */}
+    <header className="relative z-10 flex-shrink-0 pt-8 pb-4 px-4">
+        <div className="max-w-6xl mx-auto flex items-center justify-between">
+          <h1 className="text-2xl sm:text-3xl lg:text-4xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 flex items-center gap-2">
+            <SparklesIcon className="w-6 h-6 sm:w-8 sm:h-8 lg:w-10 lg:h-10 text-indigo-400" />
+            TestSolver
+          </h1>
+          <button
+            onClick={() => setMenuOpen(v=>!v)}
+            className="relative inline-flex items-center justify-center w-10 h-10 rounded-full bg-slate-800 border border-slate-600 shadow hover:bg-slate-700 transition-colors"
+            aria-label="Perfil"
           >
-            <GearIcon className="w-5 h-5 transition-transform duration-300 group-hover:rotate-90" />
+            <span className="text-sm font-bold text-slate-200">{userEmail?.trim()?.charAt(0)?.toUpperCase() || 'U'}</span>
+            {needsKeyGate && (
+              <span className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-red-500 border border-slate-900 rounded-full" />
+            )}
           </button>
-        )}
-        
-        {/* Overlay semi-transparente cuando el menú está abierto */}
-        {menuOpen && (
-          <div 
-            className="fixed inset-0 bg-black/20 backdrop-blur-sm z-30" 
-            onClick={() => setMenuOpen(false)}
-          />
-        )}
-        
-        <ModelConfigPanel 
-          open={menuOpen} 
-          onClose={()=>setMenuOpen(false)} 
-          activeModels={activeModels} 
-          onToggle={(k)=> setActiveModels(p=>({...p,[k]:!p[k]}))} 
-        />
+        </div>
+      </header>
+      {needsKeyGate && (
+        <ApiKeyGate onAuthenticated={handleAuthenticated} initialError={gateError} />
+      )}
+      
+      {/* Contenido scrolleable */}
+      <div className="relative z-10 flex-1 overflow-y-auto">
+        <main className={`container mx-auto max-w-6xl transition-all duration-300 ${menuOpen ? 'pr-0 md:pr-80' : ''} px-4 sm:px-6 lg:px-8`}>
+          
+          {error && (
+              <div className="max-w-2xl mx-auto bg-gradient-to-r from-red-500/20 to-pink-500/20 border border-red-500/60 text-red-200 px-4 py-3 rounded-xl my-4 text-center backdrop-blur-sm shadow-lg">
+                  <div className="flex items-center justify-center gap-2 mb-1">
+                    <div className="w-2 h-2 bg-red-400 rounded-full animate-pulse"></div>
+                    <span className="font-semibold text-sm">Error</span>
+                  </div>
+                  <div className="text-sm">{error}</div>
+              </div>
+          )}
+
+          {/* Banner inicial eliminado para dejar el área superior limpia */}
+          
+          {(appState === AppState.PARSING || appState === AppState.SOLVING) && (
+              <div className="flex items-center justify-center min-h-[50vh] text-center">
+                  <div className="space-y-6">
+                      <div className="inline-flex items-center justify-center">
+                         <svg className="animate-spin h-12 w-12 text-indigo-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                          </svg>
+                      </div>
+                      <div>
+                        <h2 className="text-xl sm:text-2xl font-bold text-slate-200 mb-2">
+                          {appState === AppState.PARSING ? 'Analizando preguntas...' : 'Resolviendo test...'}
+                        </h2>
+                        <p className="text-slate-400 text-sm sm:text-base">Por favor espera mientras procesamos tu contenido</p>
+                      </div>
+                      <div className="flex items-center justify-center gap-1">
+                        <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce"></div>
+                        <div className="w-2 h-2 bg-purple-500 rounded-full animate-bounce" style={{animationDelay: '0.1s'}}></div>
+                        <div className="w-2 h-2 bg-pink-500 rounded-full animate-bounce" style={{animationDelay: '0.2s'}}></div>
+                      </div>
+                  </div>
+              </div>
+          )}
+
+          {questions.length > 0 && (appState === AppState.SOLVING || appState === AppState.RESULTS) && (
+             <div className="py-4 space-y-6">
+               <ResultsDashboard questions={questions} results={results} />
+               {appState === AppState.RESULTS && (
+                  <div className="text-center pb-6">
+                    <button
+                      onClick={resetApp}
+                      className="bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-medium py-3 px-6 rounded-xl transition-all duration-300 hover:scale-105 shadow-lg text-sm sm:text-base"
+                    >
+                      Resolver otro test
+                    </button>
+                  </div>
+               )}
+             </div>
+          )}
         </main>
       </div>
+
+      {/* Input fijo en la parte inferior - solo en IDLE (sin banda de fondo) */}
+      {appState === AppState.IDLE && (
+        <div className="fixed bottom-0 left-0 right-0 z-40 p-3 sm:p-4 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pointer-events-none">
+          <div className="max-w-4xl mx-auto pointer-events-auto">
+            <InputArea onFileSubmit={handleFileSubmit} onFilesSubmit={handleFilesSubmit} onTextSubmit={handleTextSubmit} onMixedSubmit={handleMixedSubmit} isLoading={isLoading}/>
+          </div>
+        </div>
+      )}
+      
+      {/* Overlay para panel */}
+      {menuOpen && (
+        <div 
+          className="fixed inset-0 bg-black/20 backdrop-blur-sm z-30" 
+          onClick={() => setMenuOpen(false)}
+        />
+      )}
+      
+      <UnifiedPanel
+        open={menuOpen} 
+        onClose={()=>setMenuOpen(false)} 
+        activeModels={activeModels} 
+        onToggle={(k)=> setActiveModels(p=>({...p,[k]:!p[k]}))}
+        userEmail={userEmail}
+        onLogout={() => { 
+          localStorage.removeItem('authToken');
+          localStorage.removeItem('authEmail');
+          localStorage.removeItem('userKeys');
+          setUserEmail('');
+          setNeedsKeyGate(true); 
+          setMenuOpen(false); 
+        }}
+      />
     </div>
   );
 };

@@ -72,9 +72,34 @@ for (const m of geminiKeyMeta) {
 }
 geminiKeyMeta = dedupMeta;
 geminiKeys = geminiKeyMeta.map(m=>m.value);
-gLog('info', `[Gemini] API keys activas: ${geminiKeys.length} | Rotación=${geminiKeys.length > 1 ? 'ON' : 'OFF'} -> ${geminiKeyMeta.map(m=>m.name).join(', ')}`);
+const baseEnvKeyNames = geminiKeyMeta.map(m=>m.name);
+gLog('info', `[Gemini] API keys base (entorno): ${baseEnvKeyNames.length} -> ${baseEnvKeyNames.join(', ')}`);
 
 let currentKeyIndex = 0;
+
+// Inyectar claves de usuario desde localStorage (si estamos en browser)
+try {
+    const userKeysRaw = (typeof window !== 'undefined') ? window.localStorage.getItem('userKeys') : undefined;
+    const extra = userKeysRaw ? JSON.parse(userKeysRaw) : [];
+    if (Array.isArray(extra) && extra.length) {
+        let added = 0;
+        for (const k of extra) {
+            if (typeof k === 'string' && k && !geminiKeys.includes(k)) {
+                geminiKeyMeta.push({ name: 'USER_DB_KEY', value: k });
+                geminiKeys.push(k);
+                added++;
+            }
+        }
+        if (added > 0) {
+            const userNames = geminiKeyMeta.filter(m=> m.name === 'USER_DB_KEY').length;
+            gLog('info', `[Gemini] Claves de usuario añadidas: ${added}. Total: ${geminiKeys.length} (env=${baseEnvKeyNames.length}, usuario=${userNames}). Rotación=${geminiKeys.length>1?'ON':'OFF'} -> ${geminiKeyMeta.map(m=>m.name).join(', ')}`);
+        } else {
+            gLog('info', `[Gemini] Claves de usuario presentes pero ya estaban cargadas. Total: ${geminiKeys.length}.`);
+        }
+    } else {
+        gLog('info', `[Gemini] No se encontraron claves de usuario en localStorage.`);
+    }
+} catch {}
 
 const buildClient = () => new GoogleGenAI({ apiKey: geminiKeys[currentKeyIndex] });
 let ai = buildClient();
@@ -281,21 +306,9 @@ const plainExtractionSchema = {
 };
 
 export const extractQuestionsFromText = async (text: string): Promise<Question[]> => {
-    // Intento principal: formato plano solicitado por el usuario
-    try {
-        const plano = await extraerPreguntasPlano(text);
-        return plainToQuestions(plano.preguntas);
-    } catch (e) {
-        gLog('warn','[extractQuestionsFromText] Formato plano falló, usando fallback legacy.');
-    }
-    // Fallback legacy (antiguo array {id,pregunta,opciones})
-    const legacyPrompt = `EXTRACCIÓN LEGACY MCQ -> array [{id,pregunta,opciones}]\nTEXTO:\n${text}`;
-    const response: any = await withRetry(() => ai.models.generateContent({ model: 'gemini-2.5-flash', contents: legacyPrompt, config: { responseMimeType: 'application/json', responseSchema: extractionSchema, thinkingConfig: { thinkingBudget: 0 } } }), 'extract-text-legacy');
-    try {
-        let parsed = JSON.parse(response.text); parsed = postProcessExtraction(parsed); return parsed;
-    } catch (e2) {
-        console.error('[extractQuestionsFromText] Falló parse legacy:', e2); throw new Error('No se pudieron extraer preguntas del texto.');
-    }
+    // SOLO UNA PETICIÓN: formato plano solicitado por el usuario. Si falla, no hacemos fallback (evita doble llamada).
+    const plano = await extraerPreguntasPlano(text);
+    return plainToQuestions(plano.preguntas);
 };
 
 // NUEVA FUNCIÓN: devuelve el formato pedido por el usuario { preguntas: [ { enunciado, respuestas[] } ] }
@@ -305,7 +318,7 @@ export interface PreguntasPlanoResult { preguntas: PreguntaPlano[] }
 
 export const extraerPreguntasPlano = async (texto: string): Promise<PreguntasPlanoResult> => {
     const prompt = `EXTRACCIÓN ESTRUCTURA SIMPLE\nAnaliza el siguiente texto y extrae TODAS las preguntas tipo test.\nReglas clave:\n- No combines varias preguntas en un solo enunciado.\n- Cada pregunta termina antes de que empiece un patrón de nueva numeración (número + ) o letra + paréntesis) o un salto claro de contexto.\n- Elimina numeración inicial del enunciado.\n- Mínimo 2 opciones por pregunta.\n- Devuelve SOLO JSON con el formato: {"preguntas":[{"enunciado":"...","respuestas":["opción A","opción B", ...]}]}\n- NO incluyas letras (A), (B) dentro del texto de cada respuesta; sólo el contenido limpio.\n- Mantén el orden original A,B,C,...\nTexto:\n-----\n${texto}\n-----`;
-    const response: any = await withRetry(() => ai.models.generateContent({ model: 'gemini-2.5-flash', contents: prompt, config: { responseMimeType: 'application/json', responseSchema: plainExtractionSchema, thinkingConfig: { thinkingBudget: 0 } } }), 'extract-text-plain');
+    const response: any = await withRetry(() => ai.models.generateContent({ model: 'gemini-2.5-pro', contents: prompt, config: { responseMimeType: 'application/json', responseSchema: plainExtractionSchema } }), 'extract-text-plain', 'gemini-2.5-pro');
     try {
         let parsed = JSON.parse(response.text);
         // Validación básica + limpieza secundaria usando heurísticas existentes si hiciera falta
@@ -332,17 +345,12 @@ export const extractQuestionsFromFile = async (dataUrl: string): Promise<Questio
   const m = dataUrl.match(/^data:(.+?);base64,(.+)$/); if (!m) throw new Error('Formato data URL inválido');
   const mimeType = m[1]; const base64Data = m[2];
   const part = { inlineData: { mimeType, data: base64Data } };
-    // Intento formato plano
-    try {
-        const promptPlano = 'EXTRACCIÓN MCQ FORMATO PLANO => {"preguntas":[{"enunciado":"...","respuestas":["..."]}] }';
-        const respPlano: any = await withRetry(() => ai.models.generateContent({ model: 'gemini-2.5-flash', contents: { parts: [part, { text: promptPlano }] }, config: { responseMimeType: 'application/json', responseSchema: plainExtractionSchema, thinkingConfig: { thinkingBudget: 0 } } }), 'extract-file-plain');
-        const parsedPlano = JSON.parse(respPlano.text);
-        if (parsedPlano?.preguntas) return plainToQuestions(parsedPlano.preguntas);
-    } catch (e) { gLog('warn','[extractQuestionsFromFile] plano falló, fallback legacy.'); }
-    // Fallback legacy
-    const legacyPrompt = 'EXTRACCIÓN MCQ LEGACY => array [{id,pregunta,opciones}]';
-    const respLegacy: any = await withRetry(() => ai.models.generateContent({ model: 'gemini-2.5-flash', contents: { parts: [part, { text: legacyPrompt }] }, config: { responseMimeType: 'application/json', responseSchema: extractionSchema, thinkingConfig: { thinkingBudget: 0 } } }), 'extract-file-legacy');
-    try { let parsed = JSON.parse(respLegacy.text); parsed = postProcessExtraction(parsed); return parsed; } catch(e2) { throw new Error('No se pudieron extraer preguntas del archivo.'); }
+    // SOLO UNA PETICIÓN: formato plano
+    const promptPlano = 'EXTRACCIÓN MCQ FORMATO PLANO => {"preguntas":[{"enunciado":"...","respuestas":["..."]}] }';
+    const respPlano: any = await withRetry(() => ai.models.generateContent({ model: 'gemini-2.5-pro', contents: { parts: [part, { text: promptPlano }] }, config: { responseMimeType: 'application/json', responseSchema: plainExtractionSchema } }), 'extract-file-plain', 'gemini-2.5-pro');
+    const parsedPlano = JSON.parse(respPlano.text);
+    if (parsedPlano?.preguntas) return plainToQuestions(parsedPlano.preguntas);
+    throw new Error('No se pudieron extraer preguntas del archivo.');
 };
 
 // Utilidades de post-procesado
@@ -427,17 +435,58 @@ export const extractQuestionsFromFiles = async (files: SourceFileInput[]): Promi
         }
     }
     if (!parts.length) throw new Error('No se pudo preparar ningún archivo para extracción.');
-    // Intentar plano primero
-    try {
-        const promptPlano = 'EXTRACCIÓN MCQ PLANO (MULTI) => {"preguntas":[{"enunciado":"...","respuestas":["..."]}]}';
-        const respPlano: any = await withRetry(() => ai.models.generateContent({ model: 'gemini-2.5-flash', contents: [ { text: promptPlano }, ...parts ], config: { responseMimeType: 'application/json', responseSchema: plainExtractionSchema, thinkingConfig: { thinkingBudget: 0 } } }), 'extract-files-plain', 'gemini-2.5-flash');
-        const parsedPlano = JSON.parse(respPlano.text);
-        if (parsedPlano?.preguntas) return plainToQuestions(parsedPlano.preguntas);
-    } catch (e) { gLog('warn','[extractQuestionsFromFiles] plano falló, fallback legacy.'); }
-    // Fallback legacy
-    const legacyPrompt = 'EXTRACCIÓN MCQ LEGACY (MULTI) => array [{id,pregunta,opciones}]';
-    const respLegacy: any = await withRetry(() => ai.models.generateContent({ model: 'gemini-2.5-flash', contents: [ { text: legacyPrompt }, ...parts ], config: { responseMimeType: 'application/json', responseSchema: extractionSchema, thinkingConfig: { thinkingBudget: 0 } } }), 'extract-files-legacy', 'gemini-2.5-flash');
-    try { let parsed = JSON.parse(respLegacy.text); parsed = postProcessExtraction(parsed); return parsed; } catch(e2) { throw new Error('No se pudo parsear JSON de extracción de archivos.'); }
+    // SOLO UNA PETICIÓN: formato plano
+    const promptPlano = 'EXTRACCIÓN MCQ PLANO (MULTI) => {"preguntas":[{"enunciado":"...","respuestas":["..."]}]}';
+    const respPlano: any = await withRetry(() => ai.models.generateContent({ model: 'gemini-2.5-pro', contents: [ { text: promptPlano }, ...parts ], config: { responseMimeType: 'application/json', responseSchema: plainExtractionSchema } }), 'extract-files-plain', 'gemini-2.5-pro');
+    const parsedPlano = JSON.parse(respPlano.text);
+    if (parsedPlano?.preguntas) return plainToQuestions(parsedPlano.preguntas);
+    throw new Error('No se pudo extraer preguntas de los archivos.');
+};
+
+// NUEVO: extracción combinada TEXTO + ARCHIVOS (imágenes/PDF)
+export const extractQuestionsFromMixed = async (
+    text: string,
+    files: SourceFileInput[]
+): Promise<Question[]> => {
+    const trimmed = (text || '').trim();
+    // Atajos por si llega solo un tipo
+    if (!files?.length && trimmed) return await extractQuestionsFromText(trimmed);
+    if (files?.length && !trimmed) return await extractQuestionsFromFiles(files);
+    if (!files?.length && !trimmed) return [];
+
+    // Preparar parts de archivos (como en extractQuestionsFromFiles)
+    const parts: any[] = [];
+    for (const f of files) {
+        const bytes = estimateBytesFromBase64(f.base64);
+        if (bytes < MAX_INLINE_BYTES) {
+            parts.push({ inlineData: { mimeType: f.mimeType, data: f.base64 } });
+        } else {
+            try {
+                const blob = base64ToBlob(f.base64, f.mimeType);
+                const uploaded: any = await withRetry(() => ai.files.upload({ file: blob, config: { displayName: f.displayName || 'input-file' } }), 'file-upload');
+                let fileInfo: any = uploaded; let safetyCounter = 0;
+                while (fileInfo.state === 'PROCESSING' && safetyCounter < 40) {
+                    await delay(1000);
+                    fileInfo = await withRetry(() => ai.files.get({ name: uploaded.name }), 'file-get');
+                    safetyCounter++;
+                }
+                if (fileInfo.state === 'FAILED') { console.warn('[GeminiMixed] Falló procesar archivo:', f.displayName || f.mimeType); continue; }
+                if (fileInfo.uri && fileInfo.mimeType) parts.push(createPartFromUri(fileInfo.uri, fileInfo.mimeType));
+            } catch(e) { console.error('[GeminiMixed] Error subiendo archivo grande:', e); }
+        }
+    }
+    if (!parts.length) {
+        // Si por algún motivo no se pudo preparar archivos, vuelca a texto solo
+        return await extractQuestionsFromText(trimmed);
+    }
+
+    // SOLO UNA PETICIÓN: formato PLANO
+    const promptPlano = `EXTRACCIÓN COMBINADA (TEXTO + ARCHIVOS)\nDevuelve JSON {"preguntas":[{"enunciado":"...","respuestas":["..."]}]}.\nReglas: no mezclar preguntas, quitar numeración, mínimo 2 opciones.`;
+    const contents: any[] = [ { text: promptPlano }, { text: trimmed } , ...parts ];
+    const respPlano: any = await withRetry(() => ai.models.generateContent({ model: 'gemini-2.5-pro', contents, config: { responseMimeType: 'application/json', responseSchema: plainExtractionSchema } }), 'extract-mixed-plain', 'gemini-2.5-pro');
+    const parsedPlano = JSON.parse(respPlano.text);
+    if (parsedPlano?.preguntas) return plainToQuestions(parsedPlano.preguntas);
+    throw new Error('No se pudieron extraer preguntas (mixto).');
 };
 // Conversión plano -> formato interno Question
 function plainToQuestions(pregs: PreguntaPlano[]): Question[] {

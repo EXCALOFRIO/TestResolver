@@ -30,6 +30,17 @@ export default defineConfig(({ mode }) => {
         alias: {
           '@': path.resolve(__dirname, '.'),
         }
+      },
+      server: {
+        proxy: {
+          '/api': {
+            target: process.env.VITE_API_URL || 'http://localhost:8787',
+            changeOrigin: true,
+            secure: false,
+            // reescribir por si en el futuro servimos bajo prefijo
+            rewrite: (path) => path
+          }
+        }
       }
     };
 });

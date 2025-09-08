@@ -5,16 +5,28 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "server": "node server/index.js",
+    "dev:full": "concurrently -n server,web -c blue,magenta \"npm:server\" \"npm:dev\"",
     "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@google/genai": "latest",
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.12.0",
     "react": "^19.1.1",
-    "react-dom": "^19.1.1",
-    "@google/genai": "latest"
+    "react-dom": "^19.1.1"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
+  "@types/react": "^18.3.12",
+  "@types/react-dom": "^18.3.1",
+    "concurrently": "^9.0.1",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
   }
