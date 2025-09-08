@@ -55,6 +55,33 @@ Configuración de API (Gemini / @google/genai)
 -------------------------------------------
 El proyecto usa `@google/genai` para llamadas al modelo. Proporciona las credenciales según la documentación de `@google/genai` o tu proveedor (por ejemplo, variables de entorno o fichero de credenciales). No se incluyen claves en el repositorio.
 
+Despliegue en Vercel
+--------------------
+Este repo incluye funciones serverless bajo `api/` y un archivo `vercel.json` (si no existe créalo) para garantizar un catch‑all `api/[...all].js` que enruta todas las peticiones `/api/*` a Express.
+
+Variables de entorno necesarias en el panel de Vercel (Production / Preview / Development):
+
+| Variable | Obligatoria | Descripción |
+|----------|-------------|-------------|
+| `DATABASE_URL` | Sí | Cadena completa de conexión Postgres (sslmode=require recomendado). |
+| `JWT_SECRET` | Sí | Secreto aleatorio para firmar JWT. |
+| `VITE_GEMINI_API_KEY` | Opcional | Clave Gemini primaria para pruebas. |
+| `VITE_GEMINI_API_KEY2..n` | Opcional | Claves adicionales para el pool. |
+
+Solución a 404 en `/api/auth/register`
+--------------------------------------
+Si en producción obtienes `404 Not Found` pero en local funciona:
+
+1. Asegura que el deployment contiene la carpeta `api/` y el archivo `[...all].js`.
+2. Comprueba logs de la función: deberías ver `[api catch-all] incoming POST /api/auth/register`.
+3. Si no aparece, revisa `vercel.json` y limpia cache de build (Redeploy > Clear cache).
+4. Verifica que no tienes un rewrite que consuma `/api/(.*)` antes del catch‑all.
+5. Llama a `/api/health` para confirmar que la función responde (y para ver estado de la base de datos: `{ ok:true, db:true/false }`).
+
+Notas sobre base de datos
+-------------------------
+`ensureSchema()` crea tablas idempotentemente en arranques fríos. Si la BD no está accesible, verás warnings y las rutas que la usan fallarán con `SERVER_ERROR`, pero otras rutas pueden seguir respondiendo.
+
 Licencia
 --------
 Revisa `LICENSE` en el repositorio.
