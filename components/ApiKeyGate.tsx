@@ -166,10 +166,14 @@ export const ApiKeyGate: React.FC<Props> = ({ onAuthenticated, initialError }) =
   };
 
   const logout = () => {
-    localStorage.removeItem('authToken');
-    setStep(0);
-    setMode(null);
-    clearForms();
+    try {
+      localStorage.removeItem('authToken');
+      // Opcional: limpiar estado sensible adicional si hiciera falta
+      // localStorage.removeItem('authEmail');
+      // No tocamos userKeys para que el usuario no tenga que revalidar sus claves.
+    } catch {}
+    // Recargar antes de que se vuelva a mostrar el popup para forzar estado limpio global
+    window.location.reload();
   };
 
   return (
