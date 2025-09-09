@@ -1,7 +1,8 @@
-import app from '../../../server/index.js';
+import app, { schemaReady } from '../../../server/index.js';
 
 // /api/tests/:id  (+ PATCH/DELETE) y /api/tests/:id/share (POST)
-export default function handler(req, res){
+export default async function handler(req, res){
+  await schemaReady;
   const original = req.url;
   // Casos esperados que Vercel puede pasar: '/7', '/7/share'
   if(/^\/\d+(?:\/share)?$/.test(original)){

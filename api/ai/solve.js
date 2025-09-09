@@ -1,7 +1,8 @@
-import app from '../../../server/index.js';
+import app, { schemaReady } from '../../../server/index.js';
 
 // /api/ai/solve (POST)
-export default function handler(req, res){
+export default async function handler(req, res){
+  await schemaReady;
   if(!req.url.startsWith('/api/ai/solve')){
     req.url = '/api/ai/solve';
   }

@@ -1,6 +1,6 @@
 import app, { schemaReady } from '../../../../server/index.js';
 
-// /api/ai/proxy/pool-debug (GET)
+// /api/ai/proxy/pool-debug (GET)  -- backup
 export default async function handler(req, res){
   await schemaReady;
   if(!req.url.startsWith('/api/ai/proxy/pool-debug')){
