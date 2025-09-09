@@ -27,7 +27,9 @@ app.get('/api/health', async (_req, res) => {
   try { await pool.query('SELECT 1'); return res.json({ ok:true, db:true }); } catch { return res.json({ ok:true, db:false }); }
 });
 
+let __schemaInitialized = false;
 async function ensureSchema(){
+  if (__schemaInitialized) return;
   let client; try { client = await pool.connect(); } catch (e){ console.error('[db] conexión falló', e?.message); return; }
   try {
     // Usar IF NOT EXISTS para que sea idempotente sin romper la transacción.
@@ -66,7 +68,8 @@ async function ensureSchema(){
     await client.query('ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS share_token TEXT UNIQUE');
     await client.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_test_runs_share_token ON test_runs(share_token)');
     await client.query('CREATE INDEX IF NOT EXISTS idx_test_runs_user_created ON test_runs(user_id, created_at DESC)');
-    await client.query('COMMIT');
+  await client.query('COMMIT');
+  __schemaInitialized = true;
   } catch (e){
     try { await client.query('ROLLBACK'); } catch {}
     console.error('[schema]', e);
@@ -361,6 +364,14 @@ if (!process.env.VERCEL) {
   });
 }
 
-ensureSchema().then(()=>{ if(!process.env.VERCEL){ app.listen(PORT, ()=> console.log(`[server] http://localhost:${PORT}`)); } else { console.log('[server] vercel mode'); } });
+export const schemaReady = ensureSchema().then(()=>{
+  if(!process.env.VERCEL){
+    app.listen(PORT, ()=> console.log(`[server] http://localhost:${PORT}`));
+  } else {
+    console.log('[server] vercel mode');
+  }
+}).catch(e=>{ console.error('[schemaReady] init error', e); });
+
+export { ensureSchema };
 
 export default app;
