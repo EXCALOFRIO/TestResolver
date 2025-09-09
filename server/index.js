@@ -361,6 +361,21 @@ if (!process.env.VERCEL) {
   });
 }
 
+// Debug DB (antes era una función serverless separada). No requiere auth, solo estado.
+app.get('/api/debug/db', async (_req, res) => {
+  try {
+    await ensureSchema();
+    const users = await pool.query('SELECT COUNT(*)::int AS c FROM users');
+    const keys = await pool.query('SELECT COUNT(*)::int AS c FROM api_keys');
+    const sample = await pool.query('SELECT id, email, created_at FROM users ORDER BY id DESC LIMIT 3');
+    const sampleKeys = await pool.query('SELECT id, user_id, LEFT(api_key,6)||"..." AS api_key, share_pool, last_valid FROM api_keys ORDER BY id DESC LIMIT 3');
+    return res.json({ ok:true, db:true, users:users.rows[0].c, api_keys:keys.rows[0].c, sampleUsers: sample.rows, sampleKeys: sampleKeys.rows });
+  } catch (e){
+    console.error('[debug/db]', e);
+    return res.status(500).json({ ok:false, error:'QUERY_FAIL', message:e?.message });
+  }
+});
+
 ensureSchema().then(()=>{ if(!process.env.VERCEL){ app.listen(PORT, ()=> console.log(`[server] http://localhost:${PORT}`)); } else { console.log('[server] vercel mode'); } });
 
 export default app;
