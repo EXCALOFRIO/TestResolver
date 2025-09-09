@@ -376,6 +376,9 @@ app.get('/api/debug/db', async (_req, res) => {
   }
 });
 
-ensureSchema().then(()=>{ if(!process.env.VERCEL){ app.listen(PORT, ()=> console.log(`[server] http://localhost:${PORT}`)); } else { console.log('[server] vercel mode'); } });
+// Inicialización del esquema (promise reutilizable para cold starts en serverless)
+const schemaReady = ensureSchema();
+schemaReady.then(()=>{ if(!process.env.VERCEL){ app.listen(PORT, ()=> console.log(`[server] http://localhost:${PORT}`)); } else { console.log('[server] vercel mode'); } });
 
+export { schemaReady };
 export default app;
