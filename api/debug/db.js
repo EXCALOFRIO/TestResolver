@@ -1,5 +1,5 @@
-import { pool, ensureSchema } from '../_db.js';
-import { send } from '../_http.js';
+import { pool, ensureSchema } from '../../server/lib/db.js';
+import { send } from '../../server/lib/http.js';
 
 export default async function handler(_req, res){
   await ensureSchema();
