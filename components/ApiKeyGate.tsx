@@ -57,6 +57,8 @@ export const ApiKeyGate: React.FC<Props> = ({ onAuthenticated, initialError }) =
   const friendlyError = (raw: any): string => {
     const code = String(raw?.error || raw?.code || raw?.message || '').toUpperCase();
     switch (code) {
+      case 'KEY_ALREADY_EXISTS':
+        return 'Esta clave ya está en uso.';
       case 'EMAIL_EXISTS':
         return 'No se pudo completar. Prueba con otro correo o inicia sesión.';
       case 'INVALID_CREDENTIALS':
@@ -83,20 +85,30 @@ export const ApiKeyGate: React.FC<Props> = ({ onAuthenticated, initialError }) =
   localStorage.setItem('authEmail', (user?.email || email || '').toString());
       // Intentar recuperar claves del backend y validar
       try {
+        // Cargar claves propias
         const res = await fetch('/api/apikey', { headers: { Authorization: `Bearer ${token}` }, credentials: 'include' });
-        if (res.ok) {
-          const data = await res.json();
-          const keys: string[] = Array.isArray(data?.keys) ? data.keys : [];
-          for (const k of keys) {
-            if (await validateGeminiKey(k)) {
-              const current = JSON.parse(localStorage.getItem('userKeys') || '[]');
-              const updated = Array.from(new Set([k, ...(Array.isArray(current) ? current : [])]));
-              localStorage.setItem('userKeys', JSON.stringify(updated));
-              onAuthenticated(token);
-              setLoading(false);
-              return;
-            }
+        const ownData = res.ok ? await res.json().catch(()=>({})) : {};
+        const ownKeys: Array<{id:number, api_key:string}> = Array.isArray(ownData?.keys) ? ownData.keys : [];
+        const validCollected: Array<{id?:number, api_key:string}> = [];
+        for (const entry of ownKeys) {
+          const k = entry.api_key;
+          if (await validateGeminiKey(k)) {
+            validCollected.push({ id: entry.id, api_key: k });
+            console.info('[ApiKeyGate] Clave de usuario válida desde DB id=', entry.id);
           }
+        }
+        if (validCollected.length) {
+          const current = JSON.parse(localStorage.getItem('userKeys') || '[]');
+          // Guardamos array de objetos {id?, api_key}
+          const merged = Array.isArray(current) ? (current.concat(validCollected)) : validCollected;
+          // Deduplicar por api_key
+          const seen = new Map<string, any>();
+          for (const it of merged) { if (!seen.has(it.api_key)) seen.set(it.api_key, it); }
+          const updated = Array.from(seen.values());
+          localStorage.setItem('userKeys', JSON.stringify(updated));
+          onAuthenticated(token);
+          setLoading(false);
+          return;
         }
       } catch {}
   setStep(2);
@@ -133,7 +145,12 @@ export const ApiKeyGate: React.FC<Props> = ({ onAuthenticated, initialError }) =
       localStorage.setItem('userKeys', JSON.stringify(updated));
       onAuthenticated(token);
     } catch (e: any) {
-      setError('No se pudo guardar la clave.');
+      // Mostrar mensaje más específico si el backend indica que la clave ya existe
+      if (e && (e.error === 'KEY_ALREADY_EXISTS' || String(e?.error || '').toUpperCase() === 'KEY_ALREADY_EXISTS')) {
+        setError('La clave ya está registrada y no puede volver a guardarse.');
+      } else {
+        setError('No se pudo guardar la clave.');
+      }
     } finally {
       setLoading(false);
     }

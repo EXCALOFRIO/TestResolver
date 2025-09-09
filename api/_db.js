@@ -1,11 +1,25 @@
 import { Pool } from 'pg';
 
-// Pool compartido entre invocaciones (Vercel mantiene en caliente).
+// Pool compartido entre invocaciones (Vercel mantiene instancias calientes un rato).
 const DATABASE_URL = process.env.DATABASE_URL;
 export const pool = DATABASE_URL ? new Pool({
   connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
+  max: 5,
+  idleTimeoutMillis: 10000,
+  connectionTimeoutMillis: 5000
 }) : null;
+
+if (!DATABASE_URL) {
+  console.warn('[db] DATABASE_URL ausente: no habrá persistencia de claves de usuario');
+}
+
+async function testOnce(){
+  if (!pool) return;
+  try { await pool.query('SELECT 1'); }
+  catch(e){ console.error('[db] test inicial falló', e?.code, e?.message); }
+}
+testOnce();
 
 let schemaEnsured = false;
 
@@ -15,7 +29,7 @@ export async function ensureSchema(){
   try {
     client = await pool.connect();
   } catch (e) {
-    console.warn('[db] conexión fallida (lazy) =>', e?.code || e?.message);
+  console.warn('[db] conexión fallida (ensureSchema) =>', e?.code || e?.message);
     return;
   }
   try {
@@ -35,6 +49,17 @@ export async function ensureSchema(){
       last_checked_at TIMESTAMP NULL,
       last_valid BOOLEAN NULL
     )`);
+    await client.query(`CREATE TABLE IF NOT EXISTS test_runs (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      auto_name BOOLEAN DEFAULT true,
+      questions JSONB NOT NULL,
+      results JSONB NOT NULL,
+      total_questions INTEGER NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW()
+    )`);
+    try { await client.query('CREATE INDEX IF NOT EXISTS idx_test_runs_user_created ON test_runs(user_id, created_at DESC)'); } catch {}
     schemaEnsured = true;
     await client.query('COMMIT');
   } catch (e) {

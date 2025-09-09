@@ -44,7 +44,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({ question, result }) 
   const isHighConfidence = leaderShare > 50; // estrictamente mayor que 50%
 
   return (
-    <div className="bg-slate-800/40 backdrop-blur-sm border border-slate-700/60 rounded-xl p-4 lg:p-6 shadow-xl hover:shadow-2xl transition-all duration-300 hover:border-slate-600/80">
+    <div data-question-id={question.id} className="bg-slate-800/40 backdrop-blur-sm border border-slate-700/60 rounded-xl p-4 lg:p-6 shadow-xl hover:shadow-2xl transition-all duration-300 hover:border-slate-600/80">
       <div className="flex flex-wrap items-start justify-between mb-3 gap-3">
         <div>
           <h3 className="text-base lg:text-lg font-semibold text-slate-200 leading-tight mb-1">

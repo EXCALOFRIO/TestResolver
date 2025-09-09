@@ -16,11 +16,17 @@ export async function validateGeminiKey(key: string): Promise<boolean> {
 export async function validateAnyStoredUserKey(): Promise<boolean> {
   try {
   const raw = localStorage.getItem('userKeys') || '[]';
-  const arr = Array.isArray(JSON.parse(raw)) ? JSON.parse(raw) : [];
-  const first: string | undefined = arr.find((v: any) => typeof v === 'string' && v.trim());
-  if (!first) return false;
+  const parsed = Array.isArray(JSON.parse(raw)) ? JSON.parse(raw) : [];
+  // parsed puede ser array de strings (legacy) o array de objetos {id?, api_key}
+  let firstKey: string | undefined;
+  for (const v of parsed) {
+    if (!v) continue;
+    if (typeof v === 'string' && v.trim()) { firstKey = v.trim(); break; }
+    if (typeof v === 'object' && typeof v.api_key === 'string' && v.api_key.trim()) { firstKey = v.api_key.trim(); break; }
+  }
+  if (!firstKey) return false;
   // Validar SOLO la primera clave para evitar múltiples peticiones
-  return await validateGeminiKey(first);
+  return await validateGeminiKey(firstKey);
   } catch {
     return false;
   }

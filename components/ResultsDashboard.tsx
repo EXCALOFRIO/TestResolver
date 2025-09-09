@@ -14,11 +14,8 @@ export const ResultsDashboard: React.FC<ResultsDashboardProps> = ({ questions, r
   const overallProgress = totalQuestions > 0 ? (resolvedCount / totalQuestions) * 100 : 0;
 
   return (
-    <div className="w-full max-w-6xl mx-auto space-y-6 lg:space-y-8">
+    <div id="results-export-root" className="w-full max-w-6xl mx-auto space-y-6 lg:space-y-8">
       <div className="text-center space-y-4">
-        <h2 className="text-2xl lg:text-3xl font-bold bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent">
-          Resultados del Análisis
-        </h2>
         
         <div className="bg-slate-800/30 backdrop-blur-sm border border-slate-700/60 rounded-xl p-4 lg:p-6 shadow-xl">
           <div className="flex items-center justify-between mb-4">

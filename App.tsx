@@ -1,7 +1,8 @@
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { AppState, Question, ResultsState, StrategyKey } from './types';
 import { STRATEGIES } from './constants';
-import { extractQuestionsFromFile, extractQuestionsFromFiles, extractQuestionsFromText, extractQuestionsFromMixed, getAndResetGeminiStats, multiModelBatchSolve } from './services/geminiService';
+import { extractQuestionsFromFile, extractQuestionsFromFiles, extractQuestionsFromText, extractQuestionsFromMixed, getAndResetGeminiStats, multiModelBatchSolve, ExtractionWithTitle } from './services/geminiService';
+import { saveTestRun, getTestRun } from './services/historyService';
 import { MODEL_CONFIGS } from './modelConfigs';
 import { UnifiedPanel } from './components/UnifiedPanel';
 import { InputArea } from './components/InputArea';
@@ -9,18 +10,25 @@ import { ResultsDashboard } from './components/ResultsDashboard';
 import { SparklesIcon } from './components/icons/SparklesIcon';
 import { ApiKeyGate } from './components/ApiKeyGate';
 import { validateAnyStoredUserKey } from './services/keyUtils';
+import { NotFoundPage } from './components/NotFoundPage';
+import { exportResultsToPDF } from './services/exportService';
 
 const App: React.FC = () => {
   const [appState, setAppState] = useState<AppState>(AppState.IDLE);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [results, setResults] = useState<ResultsState>({});
+  // Ref espejo para disponer siempre del último estado de resultados (evita condiciones de carrera al guardar)
+  const resultsRef = useRef<ResultsState>({});
+  useEffect(() => { resultsRef.current = results; }, [results]);
   const allStrategies: StrategyKey[] = STRATEGIES.map(s => s.key); // mantenido por compat
   const [activeModels, setActiveModels] = useState<Record<string, boolean>>(() => Object.fromEntries(MODEL_CONFIGS.map(m => [m.key, m.enabledByDefault !== false && m.enabledByDefault !== undefined ? m.enabledByDefault : false])));
   const [menuOpen, setMenuOpen] = useState<boolean>(false);
+  const [currentRunId, setCurrentRunId] = useState<number | null>(null);
   const [userEmail, setUserEmail] = useState<string>('');
   const [needsKeyGate, setNeedsKeyGate] = useState<boolean>(false);
   const [gateError, setGateError] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
+  const [displayTitle, setDisplayTitle] = useState<string | null>(null);
   // Buffer global para votos en streaming (evita renders excesivos)
   const pendingBatchRef = useRef<Record<number, { letter: string; label: string }[]>>({});
   const flushTimeoutRef = useRef<number | null>(null);
@@ -59,16 +67,18 @@ const App: React.FC = () => {
     return true;
   };
 
-  const processTest = useCallback(async (getQuestions: () => Promise<Question[]>) => {
+  const processTest = useCallback(async (getQuestions: () => Promise<ExtractionWithTitle>) => {
     const hasKey = await ensureValidKeyOrGate();
     if (!hasKey) return;
     setError(null);
     setAppState(AppState.PARSING);
     setQuestions([]);
     setResults({});
+    setCurrentRunId(null);
 
     try {
-        const rawQuestions = await getQuestions();
+  const { questions: rawQuestions, title: extractedTitle } = await getQuestions();
+  if (extractedTitle) setDisplayTitle(extractedTitle);
         // Normalizar claves de opciones a letras para evitar desalineación (ej: '1','2' -> 'A','B')
         const parsedQuestions: Question[] = rawQuestions.map(q => {
           const keys = Object.keys(q.opciones);
@@ -178,7 +188,7 @@ const App: React.FC = () => {
 
         // Finalize: garantizar que cada pregunta alcance expectedVotes añadiendo fallbacks si faltan
         setResults(prev => {
-          const newResults = JSON.parse(JSON.stringify(prev));
+          const newResults: ResultsState = JSON.parse(JSON.stringify(prev));
           for (const q of parsedQuestions) {
             const qr = newResults[q.id]; if (!qr) continue;
             const expected: number = Number(qr.expectedVotes || 0);
@@ -220,6 +230,15 @@ const App: React.FC = () => {
   const stats = getAndResetGeminiStats();
   console.log('[Gemini Usage Summary]', stats);
   setAppState(AppState.RESULTS);
+  // Guardar historial (no bloquear UI)
+  try {
+    // Esperar un microturno para asegurar que finalResultsSnapshot se llenó
+    await new Promise(r => setTimeout(r,0));
+  // Usar siempre la última versión confirmada en el ref (más robusto que variable local)
+  const snapshot = resultsRef.current && Object.keys(resultsRef.current).length ? resultsRef.current : initialResults;
+  const saved = await saveTestRun({ name: extractedTitle, questions: parsedQuestions, results: snapshot });
+    if (saved?.id) setCurrentRunId(saved.id);
+  } catch {}
 
     } catch (err: any) {
         console.error("[ProcessTest] Error completo:", err);
@@ -262,7 +281,6 @@ const App: React.FC = () => {
     };
     processTest(async () => {
       const sources = dataUrls.map(toSource).filter(Boolean) as { base64: string; mimeType: string }[];
-      // Reusar extractQuestionsFromFiles (ya maneja subida/grandes)
       return await extractQuestionsFromFiles(sources);
     });
   }, [processTest]);
@@ -291,12 +309,155 @@ const App: React.FC = () => {
     setQuestions([]);
     setResults({});
     setError(null);
+    setCurrentRunId(null);
+  setDisplayTitle(null);
   };
 
+  const loadRun = useCallback(async (runId: number) => {
+    const detail = await getTestRun(runId);
+    if (!detail) return;
+    // Normalizar resultados cargados (compatibilidad con versiones viejas y cálculo de métricas faltantes)
+    const loadedQuestions = detail.questions || [];
+    const loadedResultsRaw: ResultsState = (detail.results || {}) as ResultsState;
+    const normalized: ResultsState = {};
+    const weightOf = (lab: string): number => {
+      if (!lab || lab === 'fallback') return 1;
+      const mk = lab.split(':')[0];
+      const cfg = MODEL_CONFIGS.find(m=> m.key === mk);
+      return cfg?.weight || 1;
+    };
+    for (const q of loadedQuestions) {
+      const qr = JSON.parse(JSON.stringify(loadedResultsRaw[q.id] || { votes: {}, isResolved: false }));
+      // Asegurar estructura básica
+      qr.votes = qr.votes || {};
+      // Recalcular pesos y métricas si faltan
+      let totalWeighted = 0; let leader = ''; let leaderWeighted = -1;
+      for (const [opt, arr] of Object.entries(qr.votes)) {
+        const w = (arr as string[]).reduce((s,l)=> s+weightOf(l),0);
+        totalWeighted += w;
+        if (w > leaderWeighted) { leaderWeighted = w; leader = opt; }
+      }
+      if (leader && !qr.finalAnswer) qr.finalAnswer = leader;
+      if (typeof qr.expectedVotes !== 'number' || qr.expectedVotes <= 0) {
+        // Si no existe expectedVotes, usar totalWeighted como baseline para evitar divisiones por cero.
+        qr.expectedVotes = Math.max(1, totalWeighted);
+      }
+      if (leaderWeighted >= 0) {
+        qr.confidence = (leaderWeighted / (qr.expectedVotes || 1)) * 100;
+      }
+      if (typeof qr.receivedVotes !== 'number') qr.receivedVotes = totalWeighted;
+      if (qr.receivedVotes >= (qr.expectedVotes || 0)) qr.isResolved = true;
+      normalized[q.id] = qr;
+    }
+    setQuestions(loadedQuestions);
+    setResults(normalized);
+    setDisplayTitle(detail.name || null);
+    setCurrentRunId(runId);
+    setAppState(AppState.RESULTS);
+  }, []);
+
   // Router mínimo: rutas especiales (admin/evals eliminadas)
-  if (typeof window !== 'undefined') {
+  // ---- Routing público (share) fuera de condicionales de hooks ----
+  const [isShareView, setIsShareView] = useState(false);
+  const [shareToken, setShareToken] = useState<string | null>(null);
+  const [publicLoading, setPublicLoading] = useState(false);
+  const [publicError, setPublicError] = useState<string | null>(null);
+  const [publicName, setPublicName] = useState<string>('');
+
+  // Listener global para exportación disparada desde el panel lateral (menú contextual)
+  useEffect(() => {
+    const handler = () => {
+      if (appState === AppState.RESULTS) {
+        // Delay adicional para asegurar que el DOM esté completamente renderizado
+        setTimeout(() => {
+          exportResultsToPDF(`test-${currentRunId || 'resultado'}.pdf`, displayTitle || undefined).catch(e=>console.error('export pdf', e));
+        }, 100);
+      }
+    };
+    window.addEventListener('export-pdf-request', handler as EventListener);
+    return () => window.removeEventListener('export-pdf-request', handler as EventListener);
+  }, [appState, currentRunId, displayTitle]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const url = new URL(window.location.href);
+    const t = url.searchParams.get('t');
+    if (t && /^[a-f0-9]{10,64}$/i.test(t)) { setIsShareView(true); setShareToken(t); }
+    else { setIsShareView(false); setShareToken(null); }
+  }, []);
+
+  // Detección de 404 simple: si no es vista de compartir y la ruta no es / (o raíz con query), mostrar NotFound
+  const [isNotFound, setIsNotFound] = useState(false);
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
     const path = window.location.pathname;
-    // rutas personalizadas eliminadas en esta rama
+    // Rutas válidas actuales: '/', '' (raíz) solamente. (Share usa query ?t= )
+    if (path !== '/' && path !== '') {
+      setIsNotFound(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isShareView || !shareToken) return;
+    let abort = false;
+    (async () => {
+      try {
+        setPublicLoading(true); setPublicError(null);
+        const res = await fetch(`/api/public/tests/${shareToken}`);
+        if (!res.ok) throw new Error(res.status === 404 ? 'Test no encontrado o enlace revocado' : `HTTP ${res.status}`);
+        const data = await res.json();
+        if (!data?.ok || !data.run) throw new Error('Respuesta inválida del servidor');
+        if (abort) return;
+        setPublicName(data.run.name || 'Test Compartido');
+        setQuestions(data.run.questions || []);
+        setResults(data.run.results || {});
+        setAppState(AppState.RESULTS);
+      } catch (e:any) { if(!abort) setPublicError(e.message || 'Error cargando test'); }
+      finally { if(!abort) setPublicLoading(false); }
+    })();
+    return () => { abort = true; };
+  }, [isShareView, shareToken]);
+
+  // Reubicado: decisión de render 404 después de registrar todos los hooks para no romper orden de hooks
+  const showNotFound = isNotFound && !isShareView;
+  if (showNotFound) {
+    return <NotFoundPage />;
+  }
+
+  if (isShareView) {
+    return (
+      <div className="min-h-screen flex flex-col bg-[radial-gradient(1200px_600px_at_50%_-200px,rgba(120,119,198,0.6),transparent)] from-slate-800 to-slate-900 text-slate-100">
+        <header className="relative z-10 flex-shrink-0 pt-8 pb-4 px-4">
+          <div className="max-w-6xl mx-auto flex items-center justify-between">
+            <h1 className="text-2xl sm:text-3xl lg:text-4xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 flex items-center gap-2">
+              <SparklesIcon className="w-6 h-6 sm:w-8 sm:h-8 lg:w-10 lg:h-10 text-indigo-400" />
+              TestSolver
+            </h1>
+            <a href="/" className="text-sm px-3 py-2 rounded-lg bg-slate-800/70 border border-slate-600 hover:border-slate-500 hover:bg-slate-700 transition-colors">Volver</a>
+          </div>
+        </header>
+        <main className="flex-1 overflow-y-auto px-4 sm:px-6 lg:px-8 pb-16">
+          <div className="max-w-6xl mx-auto pt-2">
+            <div className="mb-6 text-center">
+              <h2 className="text-xl sm:text-2xl font-bold text-slate-200 mb-1">{publicName || 'Cargando test...'}</h2>
+            </div>
+            {publicLoading && (
+              <div className="flex items-center justify-center py-24">
+                <div className="flex items-center gap-3 text-slate-300"><svg className="animate-spin h-6 w-6 text-indigo-400" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg> Cargando test...</div>
+              </div>
+            )}
+            {publicError && !publicLoading && (
+              <div className="max-w-md mx-auto bg-red-500/20 border border-red-500/60 text-red-200 px-4 py-3 rounded-xl text-center">
+                {publicError}
+              </div>
+            )}
+            {!publicLoading && !publicError && appState === AppState.RESULTS && (
+              <ResultsDashboard questions={questions} results={results} />
+            )}
+          </div>
+        </main>
+      </div>
+    );
   }
 
   const handleAuthenticated = () => {
@@ -313,7 +474,7 @@ const App: React.FC = () => {
   };
 
   return (
-  <div className="min-h-screen text-slate-100 relative overflow-hidden flex flex-col bg-[radial-gradient(1200px_600px_at_50%_-200px,rgba(120,119,198,0.6),transparent)] from-slate-800 to-slate-900 bg-gradient-to-b">
+  <div className="h-screen max-h-screen text-slate-100 relative overflow-hidden flex flex-col bg-[radial-gradient(1200px_600px_at_50%_-200px,rgba(120,119,198,0.6),transparent)] from-slate-800 to-slate-900">
       
       {/* Header fijo */}
     <header className="relative z-10 flex-shrink-0 pt-8 pb-4 px-4">
@@ -339,8 +500,8 @@ const App: React.FC = () => {
       )}
       
       {/* Contenido scrolleable */}
-      <div className="relative z-10 flex-1 overflow-y-auto">
-        <main className={`container mx-auto max-w-6xl transition-all duration-300 ${menuOpen ? 'pr-0 md:pr-80' : ''} px-4 sm:px-6 lg:px-8`}>
+      <div className="relative z-10 flex-1 overflow-hidden">
+        <main className={`container mx-auto max-w-6xl transition-all duration-300 ${menuOpen ? 'pr-0 md:pr-80' : ''} px-4 sm:px-6 lg:px-8 h-full overflow-y-auto`}>
           
           {error && (
               <div className="max-w-2xl mx-auto bg-gradient-to-r from-red-500/20 to-pink-500/20 border border-red-500/60 text-red-200 px-4 py-3 rounded-xl my-4 text-center backdrop-blur-sm shadow-lg">
@@ -380,6 +541,11 @@ const App: React.FC = () => {
 
           {questions.length > 0 && (appState === AppState.SOLVING || appState === AppState.RESULTS) && (
              <div className="py-4 space-y-6">
+               {displayTitle && (
+                 <div className="text-center">
+                   <h2 className="text-xl sm:text-2xl font-bold text-slate-200 tracking-tight">{displayTitle}</h2>
+                 </div>
+               )}
                <ResultsDashboard questions={questions} results={results} />
                {appState === AppState.RESULTS && (
                   <div className="text-center pb-6">
@@ -388,6 +554,12 @@ const App: React.FC = () => {
                       className="bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-medium py-3 px-6 rounded-xl transition-all duration-300 hover:scale-105 shadow-lg text-sm sm:text-base"
                     >
                       Resolver otro test
+                    </button>
+                    <button
+                      onClick={() => exportResultsToPDF(`test-${currentRunId || 'resultado'}.pdf`, displayTitle || undefined).catch(e=>console.error('export pdf', e))}
+                      className="ml-4 bg-slate-700 hover:bg-slate-600 text-slate-100 font-medium py-3 px-6 rounded-xl transition-all duration-300 shadow text-sm sm:text-base border border-slate-600/70 hover:border-slate-500"
+                    >
+                      Exportar PDF
                     </button>
                   </div>
                )}
@@ -427,6 +599,8 @@ const App: React.FC = () => {
           setNeedsKeyGate(true); 
           setMenuOpen(false); 
         }}
+        onLoadRun={loadRun}
+        currentRunId={currentRunId}
       />
     </div>
   );

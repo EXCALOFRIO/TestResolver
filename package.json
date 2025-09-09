@@ -7,18 +7,23 @@
     "node": ">=20.x"
   },
   "scripts": {
-  "dev": "vite",
-  "build": "vite build",
-  "preview": "vite preview"
+    "dev": "vite",
+    "start:server": "node server/index.js",
+    "dev:full": "concurrently -k \"pnpm run dev\" \"pnpm run start:server\"",
+    "build": "vite build",
+    "preview": "vite preview"
   },
   "dependencies": {
     "@google/genai": "latest",
     "bcryptjs": "^2.4.3",
+  "express": "^4.18.2",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
   "jsonwebtoken": "^9.0.2",
     "pg": "^8.12.0",
+  "html2canvas": "^1.4.1",
+  "jspdf": "^2.5.2",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"
   },
@@ -29,7 +34,8 @@
   "autoprefixer": "^10.4.21",
   "concurrently": "^9.0.1",
   "tailwindcss": "^3.4.14",
-    "typescript": "~5.8.2",
-    "vite": "^6.2.0"
+  "typescript": "~5.8.2",
+  "vite": "^6.2.0",
+  "vercel": "latest"
   }
 }

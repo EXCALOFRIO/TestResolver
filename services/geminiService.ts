@@ -36,9 +36,17 @@ declare const __GEMINI_EMBED_KEYS__: any;
 interface KeyMeta { name: string; value: string; }
 let geminiKeyMeta: KeyMeta[] = allEnvKeys
     .filter(k => /^(VITE_)?GEMINI_API_KEY\d*$/.test(k))
-    .sort()
-    .map(k => ({ name: k, value: getEnv(k)! }))
+    .sort((a,b) => {
+        const re = /^(?:VITE_)?GEMINI_API_KEY(\d*)$/;
+        const ma = a.match(re); const mb = b.match(re);
+        const na = ma && ma[1] ? parseInt(ma[1],10) : 0;
+        const nb = mb && mb[1] ? parseInt(mb[1],10) : 0;
+        return na - nb;
+    })
+    .map(k => ({ name: k.replace(/^VITE_/,''), value: getEnv(k)! }))
     .filter(o => !!o.value);
+// Asegurar secuencia continua GEMINI_API_KEY0..N (renombrar si falta algún índice intermedio)
+geminiKeyMeta = geminiKeyMeta.map((m,i) => ({ name: `GEMINI_API_KEY${i}`, value: m.value }));
 let geminiKeys: string[] = geminiKeyMeta.map(m=>m.value);
 // Embed fallback
 if (typeof __GEMINI_EMBED_KEYS__ !== 'undefined' && Array.isArray(__GEMINI_EMBED_KEYS__) && __GEMINI_EMBED_KEYS__.length && geminiKeys.length === 0) {
@@ -73,7 +81,13 @@ for (const m of geminiKeyMeta) {
 geminiKeyMeta = dedupMeta;
 geminiKeys = geminiKeyMeta.map(m=>m.value);
 const baseEnvKeyNames = geminiKeyMeta.map(m=>m.name);
-gLog('info', `[Gemini] API keys base (entorno): ${baseEnvKeyNames.length} -> ${baseEnvKeyNames.join(', ')}`);
+const envKeyCount = baseEnvKeyNames.length; // guardar antes de añadir usuario
+const verboseKeys = (getEnv('VITE_GEMINI_VERBOSE_KEYS') || getEnv('GEMINI_VERBOSE_KEYS') || '').toLowerCase() === 'true';
+if (verboseKeys) {
+    gLog('info', `[Gemini] API keys base (entorno): ${baseEnvKeyNames.length} -> ${baseEnvKeyNames.join(', ')} (orden numérico)`);
+} else {
+    gLog('info', `[Gemini] API keys base (entorno): ${baseEnvKeyNames.length}`);
+}
 
 let currentKeyIndex = 0;
 
@@ -84,22 +98,55 @@ try {
     if (Array.isArray(extra) && extra.length) {
         let added = 0;
         for (const k of extra) {
-            if (typeof k === 'string' && k && !geminiKeys.includes(k)) {
-                geminiKeyMeta.push({ name: 'USER_DB_KEY', value: k });
-                geminiKeys.push(k);
+            // k puede ser string (legacy) o { id?, api_key }
+            const val = (typeof k === 'string') ? k : (k && typeof k.api_key === 'string' ? k.api_key : null);
+            const id = (k && typeof k === 'object' && typeof k.id !== 'undefined') ? k.id : undefined;
+            if (val && !geminiKeys.includes(val)) {
+                const name = typeof id !== 'undefined' ? `USER_DB_KEY_${id}` : 'USER_DB_KEY';
+                geminiKeyMeta.push({ name, value: val });
+                geminiKeys.push(val);
                 added++;
             }
         }
         if (added > 0) {
-            const userNames = geminiKeyMeta.filter(m=> m.name === 'USER_DB_KEY').length;
-            gLog('info', `[Gemini] Claves de usuario añadidas: ${added}. Total: ${geminiKeys.length} (env=${baseEnvKeyNames.length}, usuario=${userNames}). Rotación=${geminiKeys.length>1?'ON':'OFF'} -> ${geminiKeyMeta.map(m=>m.name).join(', ')}`);
+            const userNames = geminiKeyMeta.filter(m=> m.name.startsWith('USER_DB_KEY')).length;
+            if (verboseKeys) {
+                gLog('info', `[Gemini] Claves de usuario añadidas: ${added}. Total: ${geminiKeys.length} (env=${baseEnvKeyNames.length}, usuario=${userNames}). Rotación=${geminiKeys.length>1?'ON':'OFF'} -> ${geminiKeyMeta.map(m=>m.name).join(', ')}`);
+            } else {
+                gLog('info', `[Gemini] Añadidas ${added} claves usuario. Env=${envKeyCount} Usuario=${userNames} Total=${geminiKeys.length}`);
+            }
         } else {
-            gLog('info', `[Gemini] Claves de usuario presentes pero ya estaban cargadas. Total: ${geminiKeys.length}.`);
+            gLog('info', verboseKeys ? `[Gemini] Claves usuario sin cambios. Env=${envKeyCount} Total=${geminiKeys.length}.` : `[Gemini] Sin nuevas claves usuario. Env=${envKeyCount} Total=${geminiKeys.length}`);
         }
     } else {
         gLog('info', `[Gemini] No se encontraron claves de usuario en localStorage.`);
     }
 } catch {}
+
+// Permite refrescar dinámicamente las claves de usuario (e.g. tras login) sin recargar página
+export function refreshUserKeys(){
+    try {
+        if (typeof window === 'undefined') return;
+        const userKeysRaw = window.localStorage.getItem('userKeys');
+        const arr = userKeysRaw ? JSON.parse(userKeysRaw) : [];
+        if (!Array.isArray(arr)) return;
+        let added = 0;
+        for (const k of arr){
+            const val = (typeof k === 'string') ? k : (k && typeof k.api_key === 'string' ? k.api_key : null);
+            const id = (k && typeof k === 'object' && typeof k.id !== 'undefined') ? k.id : undefined;
+            if (val && !geminiKeys.includes(val)) {
+                const name = typeof id !== 'undefined' ? `USER_DB_KEY_${id}` : 'USER_DB_KEY';
+                geminiKeyMeta.push({ name, value: val });
+                geminiKeys.push(val);
+                concurrentClients.push(new (GoogleGenAI as any)({ apiKey: val }));
+                added++;
+            }
+        }
+        if (added){
+            if (verboseKeys) gLog('info', `[Gemini] refreshUserKeys añadió ${added} nuevas claves. Total ahora ${geminiKeys.length}.`); else gLog('info', `[Gemini] refreshUserKeys +${added}. Total=${geminiKeys.length}`);
+        }
+    } catch(e){ /* ignore */ }
+}
 
 const buildClient = () => new GoogleGenAI({ apiKey: geminiKeys[currentKeyIndex] });
 let ai = buildClient();
@@ -161,19 +208,23 @@ const withRetry = async <T>(fn: () => Promise<T>, operationLabel: string, modelN
             if (modelName) geminiStats.perModel[modelName] = (geminiStats.perModel[modelName] || 0) + 1;
             geminiStats.operations[operationLabel] = (geminiStats.operations[operationLabel] || 0) + 1;
             try {
-                // Round-robin: siguiente índice
-                let usedIndex = pickKeyIndex();
-                const client = concurrentClients[usedIndex];
-                const metaName = geminiKeyMeta[usedIndex]?.name || `KEY_${usedIndex}`;
-                geminiStats.perKey = geminiStats.perKey || {};
-                geminiStats.perKey[metaName] = (geminiStats.perKey[metaName] || 0) + 1;
-                if (configuredLevel === 'debug') {
-                    const rawKey = geminiKeys[usedIndex] || '';
-                    const tail = rawKey.slice(-4);
-                    gLog('debug', `[Gemini][call] op=${operationLabel} model=${modelName || '-'} keyIndex=${usedIndex}/${geminiKeys.length} mode=balanced var=${metaName} tail=...${tail}`);
+                if (USE_PROXY && modelName) {
+                    // Ejecutar vía proxy (sin exponer claves) y devolver resultado adaptando a la firma esperada.
+                    return await fn(); // fn internamente deberá llamar ai.* pero en modo proxy adaptaremos abajo
+                } else {
+                    // Round-robin local
+                    let usedIndex = pickKeyIndex();
+                    const client = concurrentClients[usedIndex];
+                    const metaName = geminiKeyMeta[usedIndex]?.name || `KEY_${usedIndex}`;
+                    geminiStats.perKey = geminiStats.perKey || {};
+                    geminiStats.perKey[metaName] = (geminiStats.perKey[metaName] || 0) + 1;
+                    if (configuredLevel === 'debug') {
+                        const rawKey = geminiKeys[usedIndex] || '';
+                        const tail = rawKey.slice(-4);
+                        gLog('debug', `[Gemini][call] op=${operationLabel} model=${modelName || '-'} keyIndex=${usedIndex}/${geminiKeys.length} mode=balanced var=${metaName} tail=...${tail}`);
+                    }
+                    const prev = ai; ai = client; try { return await fn(); } finally { ai = prev; }
                 }
-                // Reasignación temporal de ai para ejecutar la función con la clave elegida
-                const prev = ai; ai = client; try { return await fn(); } finally { ai = prev; }
             } catch(e) {}
         } catch (err: any) {
             const status = err?.error?.status || err?.status || err?.code;
@@ -207,13 +258,18 @@ const withRetryConcurrent = async <T>(fnBuilder: (client: GoogleGenAI) => Promis
                 if (modelName) geminiStats.perModel[modelName] = (geminiStats.perModel[modelName] || 0) + 1;
                 geminiStats.operations[operationLabel] = (geminiStats.operations[operationLabel] || 0) + 1;
                 try {
-            const usedIdx = (client as any).__rrIdx ?? ((rrIndex - 1 + concurrentClients.length) % concurrentClients.length);
-            const metaName = geminiKeyMeta[usedIdx]?.name || `KEY_${usedIdx}`;
-                    geminiStats.perKey = geminiStats.perKey || {};
-                    geminiStats.perKey[metaName] = (geminiStats.perKey[metaName] || 0) + 1;
-        if (configuredLevel === 'debug') gLog('debug', `[Gemini][call-conc] op=${operationLabel} model=${modelName || '-'} clientIdx=${usedIdx} mode=balanced var=${metaName}`);
+                    if (!USE_PROXY) {
+                        const usedIdx = (client as any).__rrIdx ?? ((rrIndex - 1 + concurrentClients.length) % concurrentClients.length);
+                        const metaName = geminiKeyMeta[usedIdx]?.name || `KEY_${usedIdx}`;
+                        geminiStats.perKey = geminiStats.perKey || {};
+                        geminiStats.perKey[metaName] = (geminiStats.perKey[metaName] || 0) + 1;
+                        if (configuredLevel === 'debug') gLog('debug', `[Gemini][call-conc] op=${operationLabel} model=${modelName || '-'} clientIdx=${usedIdx} mode=balanced var=${metaName}`);
+                        return await fnBuilder(client);
+                    } else {
+                        // Proxy: builder recibe client pero ignoramos y dejamos que internamente use proxyGenerate si se solicitó.
+                        return await fnBuilder(client);
+                    }
                 } catch(_) {}
-                return await fnBuilder(client);
             } catch (err: any) {
                 const status = err?.error?.status || err?.status || err?.code;
                 const isRate = status === 429 || status === 'RESOURCE_EXHAUSTED';
@@ -283,10 +339,11 @@ const extractionSchema = {
   }
 };
 
-// Nuevo esquema solicitado por el usuario: { preguntas: [ { enunciado, respuestas[] } ] }
+// Nuevo esquema solicitado por el usuario: { titulo: string, preguntas: [ { enunciado, respuestas[] } ] }
 const plainExtractionSchema = {
     type: Type.OBJECT,
     properties: {
+        titulo: { type: Type.STRING, description: 'Título corto (<=5 palabras) tipo "Test <TemaPrincipal> <SubtemaOpcional>" sin comillas.' },
         preguntas: {
             type: Type.ARRAY,
             items: {
@@ -302,54 +359,69 @@ const plainExtractionSchema = {
         }
     },
     required: ['preguntas'],
-    propertyOrdering: ['preguntas']
+    propertyOrdering: ['titulo','preguntas']
 };
 
-export const extractQuestionsFromText = async (text: string): Promise<Question[]> => {
-    // SOLO UNA PETICIÓN: formato plano solicitado por el usuario. Si falla, no hacemos fallback (evita doble llamada).
+export interface ExtractionWithTitle { questions: Question[]; title?: string }
+
+export const extractQuestionsFromText = async (text: string): Promise<ExtractionWithTitle> => {
     const plano = await extraerPreguntasPlano(text);
-    return plainToQuestions(plano.preguntas);
+    return { questions: plainToQuestions(plano.preguntas), title: plano.titulo };
 };
 
 // NUEVA FUNCIÓN: devuelve el formato pedido por el usuario { preguntas: [ { enunciado, respuestas[] } ] }
 // Además reutiliza internamente la lógica de limpieza para mejorar segmentación.
 export interface PreguntaPlano { enunciado: string; respuestas: string[] }
-export interface PreguntasPlanoResult { preguntas: PreguntaPlano[] }
+export interface PreguntasPlanoResult { preguntas: PreguntaPlano[]; titulo?: string }
 
 export const extraerPreguntasPlano = async (texto: string): Promise<PreguntasPlanoResult> => {
-    const prompt = `EXTRACCIÓN ESTRUCTURA SIMPLE\nAnaliza el siguiente texto y extrae TODAS las preguntas tipo test.\nReglas clave:\n- No combines varias preguntas en un solo enunciado.\n- Cada pregunta termina antes de que empiece un patrón de nueva numeración (número + ) o letra + paréntesis) o un salto claro de contexto.\n- Elimina numeración inicial del enunciado.\n- Mínimo 2 opciones por pregunta.\n- Devuelve SOLO JSON con el formato: {"preguntas":[{"enunciado":"...","respuestas":["opción A","opción B", ...]}]}\n- NO incluyas letras (A), (B) dentro del texto de cada respuesta; sólo el contenido limpio.\n- Mantén el orden original A,B,C,...\nTexto:\n-----\n${texto}\n-----`;
-    const response: any = await withRetry(() => ai.models.generateContent({ model: 'gemini-2.5-pro', contents: prompt, config: { responseMimeType: 'application/json', responseSchema: plainExtractionSchema } }), 'extract-text-plain', 'gemini-2.5-pro');
-    try {
-        let parsed = JSON.parse(response.text);
-        // Validación básica + limpieza secundaria usando heurísticas existentes si hiciera falta
-        if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.preguntas)) {
-            throw new Error('Formato inesperado');
+    const basePrompt = (instruccionesExtra = '') => `EXTRACCIÓN ESTRUCTURA SIMPLE\nAnaliza el siguiente texto y extrae TODAS las preguntas tipo test.\nReglas clave:\n- No combines varias preguntas en un solo enunciado.\n- Cada pregunta termina antes de que empiece un patrón de nueva numeración (número + ) o letra + paréntesis) o un salto claro de contexto.\n- Elimina numeración inicial del enunciado.\n- Mínimo 2 opciones por pregunta.\n- Genera también un título corto (<=5 palabras) siguiendo el formato: Test <TemaPrincipal> <SubtemaOpcional>. Sin símbolos ni comillas.\n- Devuelve SOLO JSON con el formato: {"titulo":"...","preguntas":[{"enunciado":"...","respuestas":["opción A","opción B", ...]}]}\n- NO incluyas letras (A), (B) dentro del texto de cada respuesta; sólo el contenido limpio.\n- Mantén el orden original A,B,C,...\n${instruccionesExtra}\nTexto:\n-----\n${texto}\n-----`;
+    const models = ['gemini-2.5-pro','gemini-2.5-flash','gemini-2.5-flash-lite'];
+    let lastErr: any = null;
+    for (const model of models) {
+        try {
+            const prompt = basePrompt(model !== models[0] ? `(Reintento con modelo alternativo: ${model})` : '');
+            const response: any = await withRetry(() => ai.models.generateContent({ model, contents: prompt, config: { responseMimeType: 'application/json', responseSchema: plainExtractionSchema } }), `extract-text-plain-${model}`, model);
+            let parsed: any;
+            try { parsed = JSON.parse(response.text); } catch { throw new Error('JSON inválido'); }
+            if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.preguntas)) throw new Error('Formato inesperado');
+            const clean: PreguntaPlano[] = [];
+            parsed.preguntas.forEach((p: any) => {
+                if (!p || typeof p !== 'object') return;
+                let enunciado = String(p.enunciado || '').trim();
+                enunciado = enunciado.replace(/^(?:\d+|\([A-Z]\)|[A-Z]\))\s*[).:-]?\s*/,'').trim();
+                const respuestasRaw: string[] = Array.isArray(p.respuestas) ? p.respuestas : [];
+                const respuestas = respuestasRaw.map(r => String(r).trim().replace(/^[A-Z]\)?\s*/,'')).filter(r => r.length>0);
+                if (enunciado && respuestas.length >= 2) clean.push({ enunciado, respuestas });
+            });
+            const tituloRaw: string | undefined = typeof parsed.titulo === 'string' ? parsed.titulo.trim() : undefined;
+            return { preguntas: clean, titulo: tituloRaw };
+        } catch (err) {
+            lastErr = err;
+            continue; // intentar siguiente modelo
         }
-        const clean: PreguntaPlano[] = [];
-        parsed.preguntas.forEach((p: any) => {
-            if (!p || typeof p !== 'object') return;
-            let enunciado = String(p.enunciado || '').trim();
-            enunciado = enunciado.replace(/^(?:\d+|\([A-Z]\)|[A-Z]\))\s*[).:-]?\s*/,'').trim();
-            const respuestasRaw: string[] = Array.isArray(p.respuestas) ? p.respuestas : [];
-            const respuestas = respuestasRaw.map(r => String(r).trim().replace(/^[A-Z]\)?\s*/,'')).filter(r => r.length>0);
-            if (enunciado && respuestas.length >= 2) clean.push({ enunciado, respuestas });
-        });
-        return { preguntas: clean };
-    } catch (e) {
-        console.error('[extraerPreguntasPlano] Error parseando salida Gemini:', e);
-        throw new Error('No se pudo extraer en formato plano.');
     }
+    console.error('[extraerPreguntasPlano] Fallaron todos los modelos', lastErr);
+    throw new Error('No se pudo extraer en formato plano.');
 };
 
-export const extractQuestionsFromFile = async (dataUrl: string): Promise<Question[]> => {
+export const extractQuestionsFromFile = async (dataUrl: string): Promise<ExtractionWithTitle> => {
   const m = dataUrl.match(/^data:(.+?);base64,(.+)$/); if (!m) throw new Error('Formato data URL inválido');
   const mimeType = m[1]; const base64Data = m[2];
   const part = { inlineData: { mimeType, data: base64Data } };
-    // SOLO UNA PETICIÓN: formato plano
-    const promptPlano = 'EXTRACCIÓN MCQ FORMATO PLANO => {"preguntas":[{"enunciado":"...","respuestas":["..."]}] }';
-    const respPlano: any = await withRetry(() => ai.models.generateContent({ model: 'gemini-2.5-pro', contents: { parts: [part, { text: promptPlano }] }, config: { responseMimeType: 'application/json', responseSchema: plainExtractionSchema } }), 'extract-file-plain', 'gemini-2.5-pro');
-    const parsedPlano = JSON.parse(respPlano.text);
-    if (parsedPlano?.preguntas) return plainToQuestions(parsedPlano.preguntas);
+    const models = ['gemini-2.5-pro','gemini-2.5-flash','gemini-2.5-flash-lite'];
+    let lastErr: any = null;
+    for (const model of models) {
+        try {
+            const promptPlano = 'EXTRACCIÓN MCQ FORMATO PLANO -> JSON {"titulo":"...","preguntas":[{"enunciado":"...","respuestas":["..."]}] } (modelo '+model+')';
+            const respPlano: any = await withRetry(() => ai.models.generateContent({ model, contents: { parts: [part, { text: promptPlano }] }, config: { responseMimeType: 'application/json', responseSchema: plainExtractionSchema } }), `extract-file-plain-${model}`, model);
+            const parsedPlano = JSON.parse(respPlano.text);
+            if (parsedPlano?.preguntas) {
+                return { questions: plainToQuestions(parsedPlano.preguntas), title: typeof parsedPlano.titulo==='string'? parsedPlano.titulo.trim(): undefined };
+            }
+        } catch(e) { lastErr = e; }
+    }
+    console.error('[extractQuestionsFromFile] Fallaron todos los modelos', lastErr);
     throw new Error('No se pudieron extraer preguntas del archivo.');
 };
 
@@ -411,8 +483,8 @@ function normalizeQuestionsArray(parsedJson: any): Question[] {
     return parsedJson as Question[];
 }
 
-export const extractQuestionsFromFiles = async (files: SourceFileInput[]): Promise<Question[]> => {
-    if (!files.length) return [];
+export const extractQuestionsFromFiles = async (files: SourceFileInput[]): Promise<ExtractionWithTitle> => {
+    if (!files.length) return { questions: [] };
     console.log(`[GeminiFiles] Extrayendo preguntas de ${files.length} archivo(s) ...`);
     const parts: any[] = [];
     for (const f of files) {
@@ -435,11 +507,17 @@ export const extractQuestionsFromFiles = async (files: SourceFileInput[]): Promi
         }
     }
     if (!parts.length) throw new Error('No se pudo preparar ningún archivo para extracción.');
-    // SOLO UNA PETICIÓN: formato plano
-    const promptPlano = 'EXTRACCIÓN MCQ PLANO (MULTI) => {"preguntas":[{"enunciado":"...","respuestas":["..."]}]}';
-    const respPlano: any = await withRetry(() => ai.models.generateContent({ model: 'gemini-2.5-pro', contents: [ { text: promptPlano }, ...parts ], config: { responseMimeType: 'application/json', responseSchema: plainExtractionSchema } }), 'extract-files-plain', 'gemini-2.5-pro');
-    const parsedPlano = JSON.parse(respPlano.text);
-    if (parsedPlano?.preguntas) return plainToQuestions(parsedPlano.preguntas);
+    const models = ['gemini-2.5-pro','gemini-2.5-flash','gemini-2.5-flash-lite'];
+    let lastErr: any = null;
+    for (const model of models) {
+        try {
+            const promptPlano = 'EXTRACCIÓN MCQ PLANO (MULTI) -> JSON {"titulo":"...","preguntas":[{"enunciado":"...","respuestas":["..."]}]}';
+            const respPlano: any = await withRetry(() => ai.models.generateContent({ model, contents: [ { text: promptPlano }, ...parts ], config: { responseMimeType: 'application/json', responseSchema: plainExtractionSchema } }), `extract-files-plain-${model}`, model);
+            const parsedPlano = JSON.parse(respPlano.text);
+            if (parsedPlano?.preguntas) return { questions: plainToQuestions(parsedPlano.preguntas), title: typeof parsedPlano.titulo==='string'? parsedPlano.titulo.trim(): undefined };
+        } catch(e){ lastErr = e; }
+    }
+    console.error('[extractQuestionsFromFiles] Fallaron todos los modelos', lastErr);
     throw new Error('No se pudo extraer preguntas de los archivos.');
 };
 
@@ -447,12 +525,12 @@ export const extractQuestionsFromFiles = async (files: SourceFileInput[]): Promi
 export const extractQuestionsFromMixed = async (
     text: string,
     files: SourceFileInput[]
-): Promise<Question[]> => {
+): Promise<ExtractionWithTitle> => {
     const trimmed = (text || '').trim();
     // Atajos por si llega solo un tipo
     if (!files?.length && trimmed) return await extractQuestionsFromText(trimmed);
     if (files?.length && !trimmed) return await extractQuestionsFromFiles(files);
-    if (!files?.length && !trimmed) return [];
+    if (!files?.length && !trimmed) return { questions: [] };
 
     // Preparar parts de archivos (como en extractQuestionsFromFiles)
     const parts: any[] = [];
@@ -477,15 +555,22 @@ export const extractQuestionsFromMixed = async (
     }
     if (!parts.length) {
         // Si por algún motivo no se pudo preparar archivos, vuelca a texto solo
-        return await extractQuestionsFromText(trimmed);
+    return await extractQuestionsFromText(trimmed);
     }
 
     // SOLO UNA PETICIÓN: formato PLANO
     const promptPlano = `EXTRACCIÓN COMBINADA (TEXTO + ARCHIVOS)\nDevuelve JSON {"preguntas":[{"enunciado":"...","respuestas":["..."]}]}.\nReglas: no mezclar preguntas, quitar numeración, mínimo 2 opciones.`;
     const contents: any[] = [ { text: promptPlano }, { text: trimmed } , ...parts ];
-    const respPlano: any = await withRetry(() => ai.models.generateContent({ model: 'gemini-2.5-pro', contents, config: { responseMimeType: 'application/json', responseSchema: plainExtractionSchema } }), 'extract-mixed-plain', 'gemini-2.5-pro');
-    const parsedPlano = JSON.parse(respPlano.text);
-    if (parsedPlano?.preguntas) return plainToQuestions(parsedPlano.preguntas);
+    const models = ['gemini-2.5-pro','gemini-2.5-flash','gemini-2.5-flash-lite'];
+    let lastErr: any = null;
+    for (const model of models) {
+        try {
+            const respPlano: any = await withRetry(() => ai.models.generateContent({ model, contents, config: { responseMimeType: 'application/json', responseSchema: plainExtractionSchema } }), `extract-mixed-plain-${model}`, model);
+            const parsedPlano = JSON.parse(respPlano.text);
+            if (parsedPlano?.preguntas) return { questions: plainToQuestions(parsedPlano.preguntas), title: typeof parsedPlano.titulo==='string'? parsedPlano.titulo.trim(): undefined };
+        } catch(e){ lastErr = e; }
+    }
+    console.error('[extractQuestionsFromMixed] Fallaron todos los modelos', lastErr);
     throw new Error('No se pudieron extraer preguntas (mixto).');
 };
 // Conversión plano -> formato interno Question
@@ -808,3 +893,32 @@ export const multiModelBatchSolve = async (
      const budget = Math.min(24576, Math.max(baseBudget, dynamicBudget));
      return { thinkingConfig: { thinkingBudget: budget, includeThoughts: false } };
  }
+
+// Cliente proxy (server-side pooling). Si está definido VITE_USE_PROXY se usará para las operaciones generativas.
+const USE_PROXY = (getEnv('VITE_USE_PROXY') || '').toLowerCase() === 'true';
+
+if (USE_PROXY) {
+    try {
+        gLog('info','[Gemini] Modo PROXY habilitado: las llamadas se enviarán al backend para rotación segura.');
+        // Reemplazar metadatos de claves para evitar exponer conteo real.
+        geminiKeys = ['PROXY'];
+        geminiKeyMeta = [{ name: 'PROXY', value: '_' } as any];
+        // Vaciar clientes concurrentes (serán inútiles en proxy)
+        (concurrentClients as any).length = 0;
+        // Monkey patch de generateContent para redirigir
+        (ai as any).models = { generateContent: ({ model, contents, config }: any) => proxyGenerate(model, { contents, config }) };
+    } catch (e) {
+        console.warn('[Gemini][proxy] No se pudo inicializar el modo proxy', e);
+    }
+}
+
+async function proxyGenerate(model: string, payload: { prompt?: string; contents?: any; config?: any }): Promise<any> {
+  const body: any = { model };
+  if (payload.contents) body.contents = payload.contents; else body.prompt = payload.prompt;
+  if (payload.config) body.config = payload.config;
+  const resp = await fetch('/api/ai/proxy/generate', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': localStorage.getItem('authToken') ? `Bearer ${localStorage.getItem('authToken')}` : '' }, body: JSON.stringify(body) });
+  if (!resp.ok) throw new Error(`Proxy HTTP ${resp.status}`);
+  const data = await resp.json();
+  if (!data.ok) throw new Error('Proxy response invalid');
+  return { text: data.text } as any;
+}

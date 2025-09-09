@@ -65,6 +65,9 @@ export async function getUserPrimaryKey(userId){
     valid = await pingKey(row.api_key);
     try { await pool.query('UPDATE api_keys SET last_checked_at=NOW(), last_valid=$2 WHERE id=$1',[row.id, valid]); } catch {}
   }
+  if (!valid) {
+    console.warn('[ai] primary key invalid or stale for user', userId);
+  }
   return valid ? row.api_key : null;
 }
 

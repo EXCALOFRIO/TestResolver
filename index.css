@@ -2,7 +2,16 @@
 @tailwind components;
 @tailwind utilities;
 
-body { font-family: 'Inter', sans-serif; }
+/* Prevenir scroll en la página principal, especialmente en móvil */
+html, body {
+  min-height: 100%;
+  font-family: 'Inter', sans-serif;
+  /* Se elimina bloqueo de scroll para permitir ver todas las preguntas en vistas públicas */
+}
+
+#root {
+  min-height: 100%;
+}
 
 /* Scrollbar personalizada */
 .thin-scroll::-webkit-scrollbar {

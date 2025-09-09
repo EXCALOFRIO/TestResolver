@@ -84,3 +84,18 @@ export enum AppState {
   SOLVING = "SOLVING",
   RESULTS = "RESULTS",
 }
+
+// ---- Historial ----
+export interface TestRunSummary {
+  id: number;
+  name: string;
+  auto_name: boolean;
+  total_questions: number;
+  created_at: string;
+  share_token?: string | null;
+  share_url?: string; // calculado en el front cuando exista token
+}
+export interface TestRunDetail extends TestRunSummary {
+  questions: Question[];
+  results: ResultsState;
+}
