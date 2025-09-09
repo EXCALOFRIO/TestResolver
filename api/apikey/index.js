@@ -9,8 +9,9 @@ export default async function handler(req, res){
   const uid = user.uid;
   if (req.method === 'GET'){
     try {
-      const r = await pool.query('SELECT api_key FROM api_keys WHERE user_id=$1 ORDER BY id DESC',[uid]);
-      return send(res, 200, { keys: r.rows.map(r=>r.api_key) });
+  // Devolver objetos { id, api_key } para que el cliente pueda asociar (y compatibilidad con versiones previas que esperaban objetos)
+  const r = await pool.query('SELECT id, api_key FROM api_keys WHERE user_id=$1 ORDER BY id DESC',[uid]);
+  return send(res, 200, { keys: r.rows });
     } catch (e){ console.error('[apikey:list]', e); return send(res, 500, { error:'SERVER_ERROR' }); }
   }
   if (req.method === 'POST'){

@@ -88,9 +88,15 @@ export const ApiKeyGate: React.FC<Props> = ({ onAuthenticated, initialError }) =
         // Cargar claves propias
         const res = await fetch('/api/apikey', { headers: { Authorization: `Bearer ${token}` }, credentials: 'include' });
         const ownData = res.ok ? await res.json().catch(()=>({})) : {};
-        const ownKeys: Array<{id:number, api_key:string}> = Array.isArray(ownData?.keys) ? ownData.keys : [];
+        const rawKeys: any[] = Array.isArray(ownData?.keys) ? ownData.keys : [];
+        // Compatibilidad: puede venir array de strings (antiguo) o de objetos {id, api_key}
+        const normalized = rawKeys.map(k => {
+          if (k && typeof k === 'object' && typeof k.api_key === 'string') return { id: k.id, api_key: k.api_key };
+          if (typeof k === 'string') return { api_key: k };
+          return null;
+        }).filter(Boolean) as Array<{id?:number, api_key:string}>;
         const validCollected: Array<{id?:number, api_key:string}> = [];
-        for (const entry of ownKeys) {
+        for (const entry of normalized) {
           const k = entry.api_key;
           if (await validateGeminiKey(k)) {
             validCollected.push({ id: entry.id, api_key: k });
@@ -98,14 +104,17 @@ export const ApiKeyGate: React.FC<Props> = ({ onAuthenticated, initialError }) =
           }
         }
         if (validCollected.length) {
-          const current = JSON.parse(localStorage.getItem('userKeys') || '[]');
-          // Guardamos array de objetos {id?, api_key}
-          const merged = Array.isArray(current) ? (current.concat(validCollected)) : validCollected;
-          // Deduplicar por api_key
-          const seen = new Map<string, any>();
-          for (const it of merged) { if (!seen.has(it.api_key)) seen.set(it.api_key, it); }
-          const updated = Array.from(seen.values());
-          localStorage.setItem('userKeys', JSON.stringify(updated));
+          const currentRaw = localStorage.getItem('userKeys') || '[]';
+          let currentParsed: any[] = [];
+          try { currentParsed = JSON.parse(currentRaw); } catch {}
+          const currentNormalized = Array.isArray(currentParsed) ? currentParsed.map(v => {
+            if (v && typeof v === 'object' && typeof v.api_key === 'string') return { id: v.id, api_key: v.api_key };
+            if (typeof v === 'string') return { api_key: v };
+            return null; }).filter(Boolean) : [];
+          const merged: Array<{id?:number, api_key:string}> = [...currentNormalized, ...validCollected];
+          const seen = new Map<string, {id?:number, api_key:string}>();
+          for (const it of merged) { if (it.api_key && !seen.has(it.api_key)) seen.set(it.api_key, it); }
+          localStorage.setItem('userKeys', JSON.stringify(Array.from(seen.values())));
           onAuthenticated(token);
           setLoading(false);
           return;
