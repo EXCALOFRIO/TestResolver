@@ -43,6 +43,7 @@ export const UnifiedPanel: React.FC<UnifiedPanelProps> = ({
   });
   const [deleteTarget, setDeleteTarget] = useState<{ id: number; name: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [copySuccess, setCopySuccess] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -171,11 +172,16 @@ export const UnifiedPanel: React.FC<UnifiedPanelProps> = ({
                           <div className="flex items-center justify-between">
                             <div className="min-w-0 flex-1">
                               <div className="font-semibold text-slate-200 truncate">{r.name}</div>
-                              <div className="text-xs text-slate-400 flex items-center gap-2">
-                                <span className="bg-slate-700/50 px-2 py-0.5 rounded">{r.total_questions} preguntas</span>
+                              <div className="text-xs text-slate-400 flex items-center gap-1 flex-wrap">
+                                <span className="bg-slate-700/50 px-1.5 py-0.5 rounded">{r.total_questions} preguntas</span>
                                 <span>•</span>
-                                <span>{new Date(r.created_at).toLocaleDateString()}</span>
-                                {r.share_token && <span className="text-emerald-400">• Compartido</span>}
+                                <span className="whitespace-nowrap">{new Date(r.created_at).toLocaleDateString()}</span>
+                                {r.share_token && (
+                                  <>
+                                    <span>•</span>
+                                    <span className="text-emerald-400 whitespace-nowrap">Compartido</span>
+                                  </>
+                                )}
                               </div>
                             </div>
                           </div>
@@ -212,12 +218,17 @@ export const UnifiedPanel: React.FC<UnifiedPanelProps> = ({
                                   <button 
                                     onClick={async () => { 
                                       const url=`${window.location.origin}/t/${r.share_token}`; 
-                                      try { await navigator.clipboard.writeText(url); } catch {}; 
-                                      alert('Enlace copiado'); 
+                                      try { 
+                                        await navigator.clipboard.writeText(url); 
+                                        setCopySuccess(true);
+                                        setTimeout(() => setCopySuccess(false), 2000);
+                                      } catch {}; 
                                       setOpenMenuId(null); 
                                     }}
                                     className="w-full text-left px-3 py-2 text-sm text-emerald-400 hover:bg-slate-700 transition-colors"
-                                  >📋 Copiar enlace</button>
+                                  >
+                                    {copySuccess ? '✓ Copiado' : '📋 Copiar enlace'}
+                                  </button>
                                 )}
                                 <hr className="border-slate-600 my-1" />
                                 <button onClick={() => { requestDelete(r); setOpenMenuId(null); }} className="w-full text-left px-3 py-2 text-sm text-red-400 hover:bg-slate-700 transition-colors">🗑 Eliminar</button>
