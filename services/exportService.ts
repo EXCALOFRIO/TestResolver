@@ -1,20 +1,18 @@
+import { MODEL_CONFIGS } from '../modelConfigs';
+
 /**
- * Exporta el contenido del dashboard (contenedor con id "results-export-root") a un PDF.
- * Usa importaciones dinámicas para no inflar el bundle inicial.
+ * Exporta el contenido del dashboard como texto seleccionable en PDF.
+ * Versión optimizada que genera texto real en lugar de imágenes.
  */
 export async function exportResultsToPDF(filename = 'test.pdf', testTitle?: string) {
-  const [{ default: html2canvas }, { default: jsPDF }] = await Promise.all([
-    import('html2canvas'),
+  const [{ default: jsPDF }] = await Promise.all([
     import('jspdf')
   ]);
   
   const root = document.getElementById('results-export-root');
   if (!root) throw new Error('No se encontró el contenedor de resultados');
   
-  // Esperar a que el DOM se renderice completamente
-  await new Promise(resolve => setTimeout(resolve, 500));
-  
-  // Crear PDF con fondo oscuro
+  // Crear PDF con texto seleccionable
   const pdf = new jsPDF({ 
     orientation: 'p', 
     unit: 'pt', 
@@ -45,6 +43,20 @@ export async function exportResultsToPDF(filename = 'test.pdf', testTitle?: stri
     const pageText = `${pageNum}`;
     const textWidth = pdf.getTextWidth(pageText);
     pdf.text(pageText, pageWidth - margin - textWidth, pageHeight - 20);
+  };
+  
+  // Función para extraer texto limpio de un elemento
+  const extractText = (element: Element): string => {
+    return element.textContent?.trim() || '';
+  };
+  
+  // Función para añadir texto con word wrap
+  const addWrappedText = (text: string, x: number, y: number, maxWidth: number, lineHeight: number = 14): number => {
+    const lines = pdf.splitTextToSize(text, maxWidth);
+    lines.forEach((line: string, index: number) => {
+      pdf.text(line, x, y + (index * lineHeight));
+    });
+    return y + (lines.length * lineHeight);
   };
   
   // Portada con nombre de la app
@@ -91,83 +103,79 @@ export async function exportResultsToPDF(filename = 'test.pdf', testTitle?: stri
   
   addPageNumber(currentPageNumber++);
   
-  // Obtener información de las preguntas para el índice
+  // Obtener información de las preguntas
   const questions = root.querySelectorAll('[data-question-id]') as NodeListOf<HTMLElement>;
   
   if (questions.length === 0) {
-    // Fallback: capturar todo el contenido si no hay preguntas individuales
-    pdf.addPage();
-    addBackground();
-    addPageNumber(currentPageNumber++);
-    await captureFullContent();
-    // Añadir número final de páginas
-    const totalPages = pdf.getNumberOfPages();
-    for (let i = 1; i <= totalPages; i++) {
-      pdf.setPage(i);
-      addPageNumber(i);
-    }
     pdf.save(filename);
     return;
   }
   
-  // Calcular cuántas preguntas caben por página y en qué página estará cada una
-  const availableHeight = pageHeight - (margin * 2) - 30; // -30 para número de página
-  let currentPageHeight = 0;
-  let questionsOnCurrentPage: { element: HTMLElement; questionNumber: number; title: string }[] = [];
-  let tempPageNumber = currentPageNumber + 1; // +1 porque el índice ocupará una página
+  // Extraer datos de las preguntas para el índice
+  const questionsData: Array<{
+    id: number;
+    title: string;
+    text: string;
+    options: Array<{ key: string; text: string; votes: number; percentage: number; isWinner: boolean }>;
+    confidence: number;
+    isResolved: boolean;
+  }> = [];
   
-  // Pre-calcular todas las alturas y páginas
-  for (let i = 0; i < questions.length; i++) {
-    const questionEl = questions[i];
-    const questionNumber = parseInt(questionEl.getAttribute('data-question-id') || '0');
+  questions.forEach((questionEl, index) => {
+    const questionId = parseInt(questionEl.getAttribute('data-question-id') || '0');
+    const titleEl = questionEl.querySelector('h3');
+    const questionTitle = titleEl ? extractText(titleEl) : `Pregunta ${questionId}`;
     
-    // Obtener título de la pregunta
-    const questionTitle = questionEl.querySelector('h3')?.textContent?.trim() || `Pregunta ${questionNumber}`;
+    // Extraer texto de la pregunta
+    const questionTextEl = questionEl.querySelector('p');
+    const questionText = questionTextEl ? extractText(questionTextEl) : '';
     
-    // Medir altura de la pregunta
-    const originalOverflow = questionEl.style.overflow;
-    questionEl.style.overflow = 'visible';
+    // Extraer opciones y estadísticas
+    const optionElements = questionEl.querySelectorAll('[class*="rounded-lg border"]');
+    const options: Array<{ key: string; text: string; votes: number; percentage: number; isWinner: boolean }> = [];
     
-    const tempCanvas = await html2canvas(questionEl, {
-      scale: 1.2,
-      backgroundColor: '#0f172a',
-      useCORS: true,
-      logging: false,
-      allowTaint: true,
-      foreignObjectRendering: false,
-      width: questionEl.scrollWidth,
-      height: questionEl.scrollHeight
+    optionElements.forEach(optionEl => {
+      const optionText = extractText(optionEl);
+      const match = optionText.match(/^([A-Z])\)\s*(.*?)\s*(\d+)\s*votos\s*(\d+)%$/);
+      if (match) {
+        const [, key, text, votes, percentage] = match;
+        const isWinner = optionEl.classList.contains('bg-gradient-to-r') && 
+                        (optionEl.classList.contains('from-emerald-500') || optionEl.classList.contains('from-amber-500'));
+        options.push({
+          key,
+          text: text.trim(),
+          votes: parseInt(votes),
+          percentage: parseInt(percentage),
+          isWinner
+        });
+      }
     });
     
-    questionEl.style.overflow = originalOverflow;
+    // Extraer confianza
+    const confidenceEl = questionEl.querySelector('[class*="bg-emerald-500"], [class*="bg-amber-500"]');
+    const confidenceText = confidenceEl ? extractText(confidenceEl) : '0%';
+    const confidence = parseInt(confidenceText.replace('%', '')) || 0;
     
-    const ratio = contentWidth / tempCanvas.width;
-    const questionHeight = tempCanvas.height * ratio;
-    
-    // Verificar si cabe en la página actual
-    if (currentPageHeight + questionHeight <= availableHeight || questionsOnCurrentPage.length === 0) {
-      // Cabe en la página actual
-      questionsOnCurrentPage.push({ element: questionEl, questionNumber, title: questionTitle });
-      currentPageHeight += questionHeight + 20;
-    } else {
-      // No cabe, registrar preguntas de la página actual
-      questionsOnCurrentPage.forEach(q => {
-        questionPages.push({ questionNumber: q.questionNumber, title: q.title, page: tempPageNumber });
-      });
-      tempPageNumber++;
-      
-      // Empezar nueva página con esta pregunta
-      questionsOnCurrentPage = [{ element: questionEl, questionNumber, title: questionTitle }];
-      currentPageHeight = questionHeight + 20;
-    }
-  }
-  
-  // Registrar última página
-  if (questionsOnCurrentPage.length > 0) {
-    questionsOnCurrentPage.forEach(q => {
-      questionPages.push({ questionNumber: q.questionNumber, title: q.title, page: tempPageNumber });
+    questionsData.push({
+      id: questionId,
+      title: questionTitle,
+      text: questionText,
+      options,
+      confidence,
+      isResolved: confidence > 0
     });
-  }
+  });
+  
+  // Calcular páginas para el índice
+  let currentPage = currentPageNumber + 1; // +1 para la página del índice
+  questionsData.forEach(q => {
+    questionPages.push({
+      questionNumber: q.id,
+      title: q.title,
+      page: currentPage
+    });
+    currentPage++; // Una página por pregunta para simplificar
+  });
   
   // Crear página de índice
   pdf.addPage();
@@ -188,7 +196,7 @@ export async function exportResultsToPDF(filename = 'test.pdf', testTitle?: stri
   let yPos = margin + 100;
   const lineHeight = 20;
   
-  questionPages.forEach((item, index) => {
+  questionPages.forEach((item) => {
     if (yPos > pageHeight - 100) {
       pdf.addPage();
       addBackground();
@@ -219,168 +227,180 @@ export async function exportResultsToPDF(filename = 'test.pdf', testTitle?: stri
   
   addPageNumber(currentPageNumber++);
   
-  // Ahora renderizar las preguntas reales
-  await renderAllQuestions();
-  
-  // Añadir números de página a todas las páginas
-  const totalPages = pdf.getNumberOfPages();
-  for (let i = 1; i <= totalPages; i++) {
-    pdf.setPage(i);
-    addPageNumber(i);
-  }
-  
-  pdf.save(filename);
-  
-  // Función para renderizar todas las preguntas
-  async function renderAllQuestions() {
-    const availableHeight = pageHeight - (margin * 2) - 30;
-    let currentPageHeight = 0;
-    let questionsOnCurrentPage: HTMLElement[] = [];
-    
-    for (let i = 0; i < questions.length; i++) {
-      const questionEl = questions[i];
-      
-      // Medir altura de la pregunta
-      const originalOverflow = questionEl.style.overflow;
-      questionEl.style.overflow = 'visible';
-      
-      const tempCanvas = await html2canvas(questionEl, {
-        scale: 1.2,
-        backgroundColor: '#0f172a',
-        useCORS: true,
-        logging: false,
-        allowTaint: true,
-        foreignObjectRendering: false,
-        width: questionEl.scrollWidth,
-        height: questionEl.scrollHeight
-      });
-      
-      questionEl.style.overflow = originalOverflow;
-      
-      const ratio = contentWidth / tempCanvas.width;
-      const questionHeight = tempCanvas.height * ratio;
-      
-      // Verificar si cabe en la página actual
-      if (currentPageHeight + questionHeight <= availableHeight || questionsOnCurrentPage.length === 0) {
-        // Cabe en la página actual
-        questionsOnCurrentPage.push(questionEl);
-        currentPageHeight += questionHeight + 20;
-      } else {
-        // No cabe, renderizar página actual y empezar nueva
-        if (questionsOnCurrentPage.length > 0) {
-          pdf.addPage();
-          addBackground();
-          await renderQuestionsPage(questionsOnCurrentPage);
-          currentPageNumber++;
-        }
-        
-        // Empezar nueva página con esta pregunta
-        questionsOnCurrentPage = [questionEl];
-        currentPageHeight = questionHeight + 20;
-      }
-    }
-    
-    // Renderizar última página si tiene preguntas
-    if (questionsOnCurrentPage.length > 0) {
-      pdf.addPage();
-      addBackground();
-      await renderQuestionsPage(questionsOnCurrentPage);
-      currentPageNumber++;
-    }
-  }
-  
-  // Función para renderizar un grupo de preguntas en una página
-  async function renderQuestionsPage(pageQuestions: HTMLElement[]) {
-    let yPosition = margin;
-    
-    for (const questionEl of pageQuestions) {
-      const originalOverflow = questionEl.style.overflow;
-      questionEl.style.overflow = 'visible';
-      
-      try {
-        const canvas = await html2canvas(questionEl, {
-          scale: 1.2,
-          backgroundColor: '#0f172a',
-          useCORS: true,
-          logging: false,
-          allowTaint: true,
-          foreignObjectRendering: false,
-          width: questionEl.scrollWidth,
-          height: questionEl.scrollHeight
-        });
-        
-        const imgData = canvas.toDataURL('image/png');
-        const ratio = contentWidth / canvas.width;
-        const imgHeight = canvas.height * ratio;
-        
-        pdf.addImage(imgData, 'PNG', margin, yPosition, contentWidth, imgHeight, undefined, 'FAST');
-        yPosition += imgHeight + 20; // Espacio entre preguntas
-        
-      } catch (error) {
-        console.error('Error capturando pregunta:', error);
-      } finally {
-        questionEl.style.overflow = originalOverflow;
-      }
-    }
-  }
-  
-  // Función fallback para capturar todo el contenido
-  async function captureFullContent() {
+  // Renderizar las preguntas como texto
+  questionsData.forEach((question) => {
+    pdf.addPage();
     addBackground();
     
-    const originalOverflow = root.style.overflow;
-    root.style.overflow = 'visible';
+    let yPos = margin;
     
-    const canvas = await html2canvas(root, {
-      scale: 1.2,
-      backgroundColor: '#0f172a',
-      useCORS: true,
-      logging: false,
-      allowTaint: true,
-      foreignObjectRendering: false
-    });
+    // Título de la pregunta
+    pdf.setTextColor(248, 250, 252); // text-slate-50
+    pdf.setFontSize(18);
+    pdf.setFont('helvetica', 'bold');
+    yPos = addWrappedText(question.title, margin, yPos, contentWidth, 22);
+    yPos += 20;
     
-    root.style.overflow = originalOverflow;
+    // Texto de la pregunta
+    pdf.setTextColor(203, 213, 225); // text-slate-300
+    pdf.setFontSize(12);
+    pdf.setFont('helvetica', 'normal');
+    yPos = addWrappedText(question.text, margin, yPos, contentWidth, 16);
+    yPos += 30;
     
-    const imgData = canvas.toDataURL('image/png');
-    const imgWidth = contentWidth;
-    const ratio = imgWidth / canvas.width;
-    const imgHeight = canvas.height * ratio;
-    
-    const availableHeight = pageHeight - (margin * 2);
-    let y = 0;
-    let remaining = imgHeight;
-    
-    while (remaining > 0) {
-      if (y > 0) {
-        pdf.addPage();
-        addBackground();
+    // Opciones
+    question.options.forEach((option) => {
+      // Color de fondo simulado con rectángulo
+      if (option.isWinner) {
+        pdf.setFillColor(16, 185, 129, 0.2); // emerald con transparencia
+        pdf.rect(margin - 5, yPos - 15, contentWidth + 10, 50, 'F');
       }
       
-      const sliceHeight = Math.min(availableHeight, remaining);
-      const sliceHeightPx = sliceHeight / ratio;
+      // Letra de la opción
+      pdf.setTextColor(248, 250, 252);
+      pdf.setFontSize(14);
+      pdf.setFont('helvetica', 'bold');
+      pdf.text(`${option.key})`, margin, yPos);
       
+      // Texto de la opción
+      pdf.setTextColor(203, 213, 225);
+      pdf.setFont('helvetica', 'normal');
+      const optionYPos = addWrappedText(option.text, margin + 25, yPos, contentWidth - 120, 16);
+      
+      // Estadísticas (derecha)
+      pdf.setTextColor(148, 163, 184);
+      pdf.setFontSize(10);
+      pdf.setFont('helvetica', 'normal');
+      const statsText = `${option.votes} votos ${option.percentage}%`;
+      const statsWidth = pdf.getTextWidth(statsText);
+      pdf.text(statsText, pageWidth - margin - statsWidth, yPos);
+      
+      // Barra de progreso simulada
+      const barWidth = 100;
+      const barHeight = 3;
+      const barX = pageWidth - margin - barWidth - 10;
+      const barY = yPos + 5;
+      
+      // Fondo de la barra
+      pdf.setFillColor(71, 85, 105); // slate-600
+      pdf.rect(barX, barY, barWidth, barHeight, 'F');
+      
+      // Progreso de la barra
+      if (option.percentage > 0) {
+        const progressWidth = (barWidth * option.percentage) / 100;
+        if (option.isWinner) {
+          pdf.setFillColor(16, 185, 129); // emerald-500
+        } else {
+          pdf.setFillColor(99, 102, 241); // indigo-500
+        }
+        pdf.rect(barX, barY, progressWidth, barHeight, 'F');
+      }
+      
+      yPos = Math.max(optionYPos, yPos) + 35;
+    });
+    
+    // Indicador de confianza
+    if (question.isResolved) {
+      yPos += 10;
+      pdf.setTextColor(148, 163, 184);
+      pdf.setFontSize(10);
+      pdf.text(`Confianza: ${question.confidence}%`, margin, yPos);
+    }
+    
+    addPageNumber(currentPageNumber++);
+  });
+  
+  pdf.save(filename);
+}
+
+/**
+ * Versión alternativa que captura el HTML como imagen (backup)
+ */
+export async function exportResultsAsImage(filename = 'test.pdf', testTitle?: string) {
+  const [{ default: html2canvas }, { default: jsPDF }] = await Promise.all([
+    import('html2canvas'),
+    import('jspdf')
+  ]);
+  
+  const root = document.getElementById('results-export-root');
+  if (!root) throw new Error('No se encontró el contenedor de resultados');
+  
+  // Esperar a que el DOM se renderice completamente
+  await new Promise(resolve => setTimeout(resolve, 500));
+  
+  const pdf = new jsPDF({ 
+    orientation: 'p', 
+    unit: 'pt', 
+    format: 'a4',
+    putOnlyUsedFonts: true
+  });
+  
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  const pageHeight = pdf.internal.pageSize.getHeight();
+  const margin = 40;
+  const contentWidth = pageWidth - (margin * 2);
+  
+  // Agregar fondo oscuro
+  pdf.setFillColor(15, 23, 42);
+  pdf.rect(0, 0, pageWidth, pageHeight, 'F');
+  
+  // Capturar todo el contenido
+  const originalOverflow = root.style.overflow;
+  root.style.overflow = 'visible';
+  
+  const canvas = await html2canvas(root, {
+    scale: 1.2,
+    backgroundColor: '#0f172a',
+    useCORS: true,
+    logging: false,
+    allowTaint: true,
+    foreignObjectRendering: false,
+    width: root.scrollWidth,
+    height: root.scrollHeight
+  });
+  
+  root.style.overflow = originalOverflow;
+  
+  const imgData = canvas.toDataURL('image/png');
+  const imgWidth = contentWidth;
+  const imgHeight = (canvas.height * imgWidth) / canvas.width;
+  
+  const availableHeight = pageHeight - (margin * 2);
+  
+  if (imgHeight <= availableHeight) {
+    // La imagen cabe en una página
+    pdf.addImage(imgData, 'PNG', margin, margin, imgWidth, imgHeight, undefined, 'FAST');
+  } else {
+    // Dividir en múltiples páginas
+    let position = 0;
+    
+    while (position < imgHeight) {
+      if (position > 0) {
+        pdf.addPage();
+        pdf.setFillColor(15, 23, 42);
+        pdf.rect(0, 0, pageWidth, pageHeight, 'F');
+      }
+      
+      const sliceHeight = Math.min(availableHeight, imgHeight - position);
+      
+      // Crear un canvas temporal para la porción
       const tempCanvas = document.createElement('canvas');
-      const ctx = tempCanvas.getContext('2d');
-      if (!ctx) break;
-      
+      const tempCtx = tempCanvas.getContext('2d')!;
       tempCanvas.width = canvas.width;
-      tempCanvas.height = sliceHeightPx;
+      tempCanvas.height = (sliceHeight * canvas.width) / imgWidth;
       
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
-      
-      ctx.drawImage(
+      tempCtx.drawImage(
         canvas,
-        0, y / ratio, canvas.width, sliceHeightPx,
-        0, 0, canvas.width, sliceHeightPx
+        0, (position * canvas.width) / imgWidth,
+        canvas.width, tempCanvas.height,
+        0, 0,
+        canvas.width, tempCanvas.height
       );
       
       const partData = tempCanvas.toDataURL('image/png');
       pdf.addImage(partData, 'PNG', margin, margin, imgWidth, sliceHeight, undefined, 'FAST');
       
-      y += sliceHeight;
-      remaining -= sliceHeight;
+      position += sliceHeight;
     }
   }
   
