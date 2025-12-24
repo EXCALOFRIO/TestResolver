@@ -731,13 +731,43 @@ export const extractQuestionsFromMixed = async (
     files: SourceFileInput[]
 ): Promise<ExtractionWithTitle> => {
     const trimmed = (text || '').trim();
-    if (!files?.length && !trimmed) return { questions: [] };
-
-    console.log(`[MixedExtract] Preparando ${files.length} archivos para análisis...`);
     const pIdx = pickKeyIndex();
     const pinnedClient = concurrentClients[pIdx];
 
-    // 1. Preparar Parts para Análisis Global
+    // 1. MODO "SINGLE-PASS" (Para ahorrar cuota en casos pequeños como 4 fotos)
+    const totalFiles = files.length;
+    const isSmallInput = totalFiles <= 8 && !files.some(f => f.mimeType === 'application/pdf');
+
+    if (isSmallInput) {
+        console.log(`[MixedExtract] Modo Single-Pass (Ahorro Cuota) para ${totalFiles} imágenes...`);
+        const payload: any[] = [];
+        files.forEach((f, i) => {
+            payload.push({ text: `[IMAGEN ${i}]` });
+            payload.push({ inlineData: { mimeType: f.mimeType, data: f.base64 } });
+        });
+        if (trimmed) payload.push({ text: `Contexto adicional: ${trimmed}` });
+
+        const prompt = `Extrae todas las preguntas de estas imágenes. 
+        Describe las imágenes si la pregunta lo requiere en 'imagenDescripcion'.
+        Formato JSON estricto.`;
+
+        try {
+            const resp: any = await withRetry(() => pinnedClient.models.generateContent({
+                model: 'gemini-2.5-flash-lite',
+                contents: [...payload, { text: prompt }],
+                config: { responseMimeType: 'application/json', responseSchema: plainExtractionSchema }
+            }), 'single-pass-extract', 'gemini-2.5-flash-lite', pIdx);
+
+            const parsed = JSON.parse(resp.text);
+            const allQs = plainToQuestions(parsed.preguntas || []);
+            allQs.forEach((q, i) => q.id = i + 1);
+            return { questions: allQs, title: "Extracción Directa" };
+        } catch (e) {
+            console.warn("Fallo Single-Pass, intentando flujo normal...", e);
+        }
+    }
+
+    // 2. Preparar Parts para Análisis Global (Flujo Normal)
     const analysisParts: any[] = [];
     const uploadedFileNames: string[] = [];
 
@@ -769,24 +799,30 @@ export const extractQuestionsFromMixed = async (
     if (trimmed) analysisParts.push({ text: `CONTEXTO TEXTO ADICIONAL:\n${trimmed}` });
 
     try {
-        // 2. Pre-Análisis Global (VERSIÓN ESTRICTA)
+        // 2. Pre-Análisis Global (Dinámico y Estricto)
         console.log(`[PreAnalysis] Ejecutando análisis estructural de ${files.length} archivos...`);
+
+        const isPdfMode = files.some(f => f.mimeType === 'application/pdf');
+        const questionCountHint = isPdfMode ? "aprox 210" : "las que detectes";
 
         const promptAnalysis = `ANALIZA LOS ${files.length} ARCHIVOS ADJUNTOS.
         
-        Objetivo: Crear un mapa preciso para extraer las 210 preguntas del examen MEDICINA.
+        Objetivo: Crear un mapa preciso para extraer las preguntas del examen.
         
-        1. Identifica el título.
+        1. Identifica el título del examen.
         2. Detecta ANEXOS (Imágenes): Indica en 'annex_file_index' qué archivo las tiene y en 'annex_start_page' en qué página empiezan.
         
-        3. Divide las preguntas en bloques de ~30-40 preguntas. Para cada bloque genera un objeto en la lista 'c':
+        3. Divide las preguntas en bloques. 
+           - Si es un PDF largo, haz bloques de 30-40 preguntas.
+           - Si son imágenes sueltas, agrupa varias imágenes en un solo bloque si tienen pocas preguntas, o una imagen por bloque si es densa.
+           - Máximo 10 bloques en total para evitar saturación.
+           
+        Para cada bloque genera un objeto en la lista 'c':
            - 'file_index': Índice del archivo donde leer (0, 1, etc).
-           - 'r_start' / 'r_end': Primera y última pregunta del bloque.
-           - 'p': ARRAY EXACTO de las páginas físicas que contienen SOLO esas preguntas.
-             EJEMPLO: Si las preguntas 1-30 están en las páginas 3, 4, 5 y 6, pon "p": [3, 4, 5, 6]. 
-             NO pongas [3, ..., 30]. Sé preciso y quirúrgico.
+           - 'r_start' / 'r_end': Rango de números de pregunta (ej: 1 a 30). Si no sabes el total, estima el rango por el contenido visual.
+           - 'p': ARRAY de páginas físicas (o [1,1] para imágenes sueltas).
              
-        IMPORTANTE: Cubre desde la pregunta 1 hasta la 210 sin huecos.`;
+        IMPORTANTE: No dejes preguntas sin cubrir. Si identificas que hay ${questionCountHint} preguntas, el mapa debe llegar hasta el final.`;
 
         const response: any = await withRetry(() => pinnedClient.models.generateContent({
             model: 'gemini-2.5-flash-lite',
@@ -834,32 +870,29 @@ export const extractQuestionsFromMixed = async (
             }
         }
 
-        // 4. Extracción Paralela con SUB-LOTES
-        const extractionTasks = globalMap.c.map(async (chunk: any, chunkIdx: number) => {
+        // 4. Extracción Secuencial Estricta (Modo Ahorro / Respeto de Cuota)
+        const allExtractedQuestions: Question[] = [];
+
+        // Procesamos los chunks UNO POR UNO (concurrencia = 1) para no reventar el RPM
+        for (let i = 0; i < globalMap.c.length; i++) {
+            const chunk = globalMap.c[i];
+            console.log(`[MixedExtract] Procesando bloque ${i + 1} de ${globalMap.c.length} de forma secuencial...`);
+
             const fileIdx = (files[chunk.file_index]) ? chunk.file_index : 0;
             const sourceFile = files[fileIdx];
-
-            if (!sourceFile) return [];
+            if (!sourceFile) continue;
 
             const startQ = chunk.r_start;
             const endQ = chunk.r_end;
+            if (!startQ || !endQ || endQ < startQ) continue;
 
-            if (!startQ || !endQ || endQ < startQ) return [];
-
-            // A) Preparar el PDF recortado para este bloque
             let contextPart: any;
             if (sourceFile.mimeType === 'application/pdf') {
                 const pageIndices = getPageIndices(chunk.p);
                 try {
-                    // Límite de seguridad: no enviar más de 20 páginas por trozo para evitar 413
                     const safeIndices = pageIndices.slice(0, 20);
                     const pdfSubset = await slicePdf(base64ToUint8(sourceFile.base64), safeIndices);
-                    contextPart = {
-                        inlineData: {
-                            mimeType: 'application/pdf',
-                            data: uint8ToBase64(pdfSubset)
-                        }
-                    };
+                    contextPart = { inlineData: { mimeType: 'application/pdf', data: uint8ToBase64(pdfSubset) } };
                 } catch (e) {
                     contextPart = { text: `Error slicing PDF en bloque ${startQ}-${endQ}` };
                 }
@@ -867,19 +900,16 @@ export const extractQuestionsFromMixed = async (
                 contextPart = { inlineData: { mimeType: sourceFile.mimeType, data: sourceFile.base64 } };
             }
 
-            // B) Sub-lotes de 20 preguntas
             const subBatches = [];
             for (let q = startQ; q <= endQ; q += 20) {
                 subBatches.push([q, Math.min(q + 19, endQ)]);
             }
 
-            const chunkQuestions: Question[] = [];
-
             for (const [subStart, subEnd] of subBatches) {
                 const prompt = `EXTRAE PREGUNTAS DEL RANGO ${subStart} A ${subEnd}.
-                - El primer documento adjunto contiene el TEXTO de las preguntas.
+                - El primer documento adjunto contiene el TEXTO/IMAGEN de las preguntas.
                 - El segundo documento (si existe) contiene las IMÁGENES/ANEXOS referenciados.
-                - Si una pregunta dice "ver imagen X", BUSCA esa imagen en el anexo y describe brevemente lo que ves en el campo 'imagenDescripcion'.
+                - Si una pregunta dice "ver imagen X", BUSCA esa imagen en el anexo y descríbela.
                 - Formato JSON estricto.`;
 
                 const chunkPayload = [contextPart];
@@ -888,11 +918,9 @@ export const extractQuestionsFromMixed = async (
                     chunkPayload.push(annexPart);
                 }
 
-                const keyIdx = (chunkIdx + subStart) % geminiKeys.length;
-                const client = concurrentClients[keyIdx];
-
+                const keyIdx = (i + subStart) % geminiKeys.length;
                 try {
-                    const resp: any = await withRetry(() => client.models.generateContent({
+                    const resp: any = await withRetry(() => concurrentClients[keyIdx].models.generateContent({
                         model: 'gemini-2.5-flash-lite',
                         contents: [...chunkPayload, { text: prompt }],
                         config: { responseMimeType: 'application/json', responseSchema: plainExtractionSchema }
@@ -900,23 +928,27 @@ export const extractQuestionsFromMixed = async (
 
                     const parsed = JSON.parse(resp.text);
                     const qs = plainToQuestions(parsed.preguntas || []);
-                    // Ajustamos IDs si el modelo no los devolvió correctamente
-                    qs.forEach((q, i) => {
+                    qs.forEach((q, idx) => {
                         if (typeof q.id !== 'number' || q.id < subStart || q.id > subEnd) {
-                            q.id = subStart + i;
+                            q.id = subStart + idx;
                         }
                     });
-                    chunkQuestions.push(...qs);
+                    allExtractedQuestions.push(...qs);
                 } catch (e) {
-                    console.error(`[Chunk ${chunkIdx}] Error en sub-lote ${subStart}-${subEnd}:`, e);
+                    console.error(`[Chunk ${i}] Error en sub-lote ${subStart}-${subEnd}:`, e);
                 }
+
+                // Pequeña pausa entre sub-lotes para no superar RPM
+                await delay(800);
             }
 
-            return chunkQuestions;
-        });
+            // Pausa mayor entre bloques
+            if (i < globalMap.c.length - 1) {
+                await delay(1500);
+            }
+        }
 
-        const results = await Promise.all(extractionTasks);
-        const allQuestions = results.flat().sort((a, b) => a.id - b.id);
+        const allQuestions = allExtractedQuestions.sort((a, b) => a.id - b.id);
 
         // Limpieza final de duplicados y re-numeración
         const uniqueQuestions: Question[] = [];
