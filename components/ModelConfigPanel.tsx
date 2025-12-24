@@ -27,11 +27,11 @@ export const ModelConfigPanel: React.FC<ModelConfigPanelProps> = ({ activeModels
           ×
         </button>
       </div>
-  <div className="p-4 space-y-3 overflow-y-auto flex-1 custom-scrollbar">
-        {MODEL_CONFIGS.map(m => {
+      <div className="p-4 space-y-3 overflow-y-auto flex-1 custom-scrollbar">
+        {MODEL_CONFIGS.filter(m => !m.hidden).map(m => {
           const enabled = activeModels[m.key] ?? true;
           return (
-            <label key={m.key} className={`group flex items-start gap-3 p-4 rounded-xl cursor-pointer border text-sm transition-all backdrop-blur-sm hover:scale-[1.02] ${enabled ? 'bg-[linear-gradient(135deg,rgba(99,102,241,0.3),rgba(139,92,246,0.2)_50%,rgba(168,85,247,0.15))] border-indigo-400/70 shadow-[0_0_0_1px_rgba(99,102,241,0.4),0_8px_25px_-8px_rgba(99,102,241,0.6)]' : 'bg-slate-800/50 border-slate-600/50 hover:border-slate-500/80 hover:bg-slate-700/60'}`}> 
+            <label key={m.key} className={`group flex items-start gap-3 p-4 rounded-xl cursor-pointer border text-sm transition-all backdrop-blur-sm hover:scale-[1.02] ${enabled ? 'bg-[linear-gradient(135deg,rgba(99,102,241,0.3),rgba(139,92,246,0.2)_50%,rgba(168,85,247,0.15))] border-indigo-400/70 shadow-[0_0_0_1px_rgba(99,102,241,0.4),0_8px_25px_-8px_rgba(99,102,241,0.6)]' : 'bg-slate-800/50 border-slate-600/50 hover:border-slate-500/80 hover:bg-slate-700/60'}`}>
               <input type="checkbox" checked={enabled} onChange={() => onToggle(m.key)} className="mt-1 accent-indigo-500 scale-125" />
               <div className="flex-1 min-w-0">
                 <div className="font-semibold text-slate-100 leading-tight flex items-center gap-2 mb-1">

@@ -11,6 +11,28 @@ export interface Question {
   pregunta: string;
   opciones: Record<string, string>;
   meta?: QuestionMeta;      // metadatos heurísticos
+  imagenDescripcion?: string; // descripción de imagen adjunta (fig, imagen, gráfico)
+}
+
+// ---- Pre-análisis de PDFs ----
+export interface PdfTextAnchor {
+  startAnchor: string;
+  endAnchor?: string;
+  questionRange: [number, number];
+}
+
+export interface PdfImageRef {
+  id: string;
+  description: string;
+  pages?: number[];
+}
+
+export interface PdfAnalysis {
+  estimatedQuestions: number;
+  contentType: 'text' | 'images' | 'mixed';
+  textChunks: PdfTextAnchor[];
+  images: PdfImageRef[];
+  annexPages: number[];
 }
 
 export enum StrategyKey {
@@ -69,6 +91,7 @@ export interface ModelConfig {
   weight?: number;        // reservado para ponderaciones futuras
   thinkingMode?: 'none' | 'optional' | 'required'; // control granular de thinkingConfig
   thinkingBudget?: number; // override explícito (e.g. 8192)
+  hidden?: boolean;       // si true, no aparece en UI (solo uso interno)
 }
 
 export interface ModelUsageSnapshot {

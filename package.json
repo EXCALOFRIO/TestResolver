@@ -16,14 +16,15 @@
   "dependencies": {
     "@google/genai": "latest",
     "bcryptjs": "^2.4.3",
-  "express": "^4.18.2",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
-  "jsonwebtoken": "^9.0.2",
+    "express": "^4.18.2",
+    "html2canvas": "^1.4.1",
+    "jsonwebtoken": "^9.0.2",
+    "jspdf": "^2.5.2",
+    "pdf-lib": "^1.17.1",
     "pg": "^8.12.0",
-  "html2canvas": "^1.4.1",
-  "jspdf": "^2.5.2",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"
   },
@@ -31,11 +32,11 @@
     "@types/node": "^22.14.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
-  "autoprefixer": "^10.4.21",
-  "concurrently": "^9.0.1",
-  "tailwindcss": "^3.4.14",
-  "typescript": "~5.8.2",
-  "vite": "^6.2.0",
-  "vercel": "latest"
+    "autoprefixer": "^10.4.21",
+    "concurrently": "^9.0.1",
+    "tailwindcss": "^3.4.14",
+    "typescript": "~5.8.2",
+    "vercel": "latest",
+    "vite": "^6.2.0"
   }
 }
